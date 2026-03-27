@@ -175,6 +175,26 @@ async def _send_message(channel_id: str, content: str) -> dict | None:
     return await _api_request("POST", f"/channels/{channel_id}/messages", json={"content": content})
 
 
+async def _send_embed(
+    channel_id: str,
+    title: str,
+    description: str,
+    color: int = 0x7C3AED,
+    fields: list[dict] | None = None,
+    footer: str | None = None,
+) -> dict | None:
+    """Send a Discord embed to a channel."""
+    embed: dict[str, Any] = {"title": title, "description": description, "color": color}
+    if fields:
+        embed["fields"] = fields
+    if footer:
+        embed["footer"] = {"text": footer}
+    embed["timestamp"] = datetime.now(timezone.utc).isoformat()
+    return await _api_request(
+        "POST", f"/channels/{channel_id}/messages", json={"embeds": [embed]}
+    )
+
+
 async def _reply(channel_id: str, message_id: str, content: str):
     """Reply to a message, splitting long content across multiple messages."""
     chunks = _split_message(content)
@@ -842,7 +862,7 @@ _DIGEST_CHANNEL_ID = os.environ.get("DIGEST_CHANNEL_ID", "1469080556720623699")
 
 
 async def post_daily_digest(channel_id: str | None = None):
-    """Generate and post a daily QA status digest.
+    """Generate and post a daily QA status digest as a Discord embed.
 
     Can be called externally (e.g. from a cron job) or from within the bot.
     Posts to the configured channel (default: #dev).
@@ -854,29 +874,59 @@ async def post_daily_digest(channel_id: str | None = None):
 
     session_id = f"discord-digest-{int(time.time())}"
     prompt = (
-        "Generate a concise daily QA status digest for the protoLabs Discord community. "
-        "Include:\n"
-        "- Overall health status of configured apps\n"
-        "- Number of features in each status (backlog, in_progress, review, blocked, done)\n"
-        "- Any active bugs or blocked features that need attention\n"
-        "- PRs awaiting review\n"
-        "- Brief summary of what shipped recently\n\n"
-        "IMPORTANT FORMATTING RULES (this will be posted to Discord):\n"
-        "- Do NOT use markdown tables (Discord doesn't render them)\n"
-        "- Use bullet lists instead of tables\n"
-        "- Bold with **text** is fine\n"
-        "- Use > for blockquotes\n"
-        "- Keep it under 1500 characters\n"
-        "- Start with a one-line verdict (e.g. 'All systems healthy' or 'Attention needed: ...')"
+        "Run a QA health check on all configured apps. Return ONLY a JSON object "
+        "(no markdown, no code fences, no explanation) with this exact structure:\n"
+        '{"verdict": "PASS or WARN or FAIL",'
+        ' "summary": "One sentence overall status",'
+        ' "board": "Board counts as a short string, e.g. 117 done / 0 blocked / 0 active",'
+        ' "issues": "Any bugs, blocked features, or PRs needing attention. None if clean.",'
+        ' "shipped": "Brief note on recent releases. e.g. v0.92.3 shipped with 4 bug fixes"}\n\n'
+        "Rules: No emojis. No markdown tables. Keep each field under 200 chars. "
+        "If everything is healthy, issues should be \"None\"."
     )
 
     result = await _ask_agent(prompt, session_id)
     if not result:
-        log.warning("Daily digest: agent returned empty response (likely auth error) — skipping post")
+        log.warning("Daily digest: agent returned empty response (likely auth error) -- skipping post")
         return
 
-    header = "**Daily QA Digest**\n\n"
-    await _send_message(target_channel, header + result)
+    # Parse structured response; fall back to plain embed on parse failure
+    try:
+        # Strip markdown code fences if the agent wrapped the JSON
+        clean = result.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+            clean = clean.rsplit("```", 1)[0]
+        data = json_mod.loads(clean)
+        verdict = data.get("verdict", "UNKNOWN")
+        color = {"PASS": 0x22C55E, "WARN": 0xEAB308, "FAIL": 0xEF4444}.get(verdict, 0x6B7280)
+
+        fields = [
+            {"name": "Board", "value": data.get("board", "N/A"), "inline": True},
+            {"name": "Shipped", "value": data.get("shipped", "N/A"), "inline": True},
+        ]
+        issues = data.get("issues", "None")
+        if issues and issues.lower() != "none":
+            fields.append({"name": "Issues", "value": issues, "inline": False})
+
+        await _send_embed(
+            target_channel,
+            title=f"QA Report -- {verdict}",
+            description=data.get("summary", ""),
+            color=color,
+            fields=fields,
+            footer="Quinn QA Engineer",
+        )
+    except (json_mod.JSONDecodeError, KeyError, TypeError) as exc:
+        log.warning("Daily digest: could not parse structured response (%s), posting as plain embed", exc)
+        # Truncate to embed description limit (4096 chars)
+        await _send_embed(
+            target_channel,
+            title="QA Report",
+            description=result[:4000],
+            footer="Quinn QA Engineer",
+        )
+
     log.info("Posted daily digest to channel %s", target_channel)
 
     audit_logger.log(
