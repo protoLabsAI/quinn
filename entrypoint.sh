@@ -1,28 +1,51 @@
 #!/bin/bash
-# protoResearcher — container entrypoint
+# Quinn — container entrypoint
 
-echo "[entrypoint] Starting protoResearcher"
+echo "[entrypoint] Starting Quinn"
 
 # Create dirs inside tmpfs home
-mkdir -p /home/sandbox/.nanobot /home/sandbox/.local
-
-# Symlink persistent cron data into nanobot's expected location
-if [ -d /opt/.cron ]; then
-    ln -sf /opt/.cron /home/sandbox/.nanobot/cron
-fi
+mkdir -p /home/sandbox/.local
 
 # Ensure persistent volume dirs exist
-mkdir -p /sandbox/audit /sandbox/knowledge /sandbox/papers
+mkdir -p /sandbox/audit /sandbox/knowledge
 
-# Copy configs from read-only image, expanding env vars (e.g. MCP_AUTH_TOKEN)
-envsubst < /opt/protoresearcher/config/nanobot-config.json > /home/sandbox/.nanobot/config.json
+# --- Infisical secret injection ---
+# Pull secrets from Infisical at startup if configured.
+# Requires INFISICAL_TOKEN (service token or machine identity) in the environment.
+if [ -n "$INFISICAL_TOKEN" ] && command -v infisical &>/dev/null; then
+    echo "[entrypoint] Pulling secrets from Infisical..."
+    INFISICAL_DOMAIN="${INFISICAL_API_URL:-https://secrets.proto-labs.ai}"
+    INFISICAL_PROJECT="${INFISICAL_PROJECT_ID:-11e172e0-a1f6-41d5-9464-df72779a7063}"
+    INFISICAL_ENV="${INFISICAL_ENVIRONMENT:-prod}"
 
-# Copy persona into workspace (nanobot reads SOUL.md from workspace)
-mkdir -p /sandbox
-cp /opt/protoresearcher/config/SOUL.md /sandbox/SOUL.md
+    # Export secrets as env vars for this process tree
+    eval "$(infisical export \
+        --domain "$INFISICAL_DOMAIN" \
+        --projectId "$INFISICAL_PROJECT" \
+        --env "$INFISICAL_ENV" \
+        --format dotenv \
+        --token "$INFISICAL_TOKEN" 2>/dev/null | sed 's/^/export /')" \
+    && echo "[entrypoint] Secrets loaded from Infisical ($INFISICAL_ENV)" \
+    || echo "[entrypoint] WARNING: Infisical secret fetch failed, falling back to env vars"
+else
+    echo "[entrypoint] Infisical not configured, using direct env vars"
+fi
+
+# Map Quinn-specific secret names to standard env vars
+if [ -n "$DISCORD_BOT_QUINN" ] && [ -z "$DISCORD_BOT_TOKEN" ]; then
+    export DISCORD_BOT_TOKEN="$DISCORD_BOT_QUINN"
+    echo "[entrypoint] Mapped DISCORD_BOT_QUINN -> DISCORD_BOT_TOKEN"
+fi
+
+# Copy persona into workspace
+mkdir -p /sandbox/skills
+cp /opt/quinn/config/SOUL.md /sandbox/SOUL.md
 
 # Copy skills into workspace
-cp -r /opt/protoresearcher/skills /sandbox/skills
+cp -r /opt/quinn/skills /sandbox/skills
+
+# Copy QA config
+cp /opt/quinn/config/qa-config.json /sandbox/qa-config.json
 
 # --- Claude credentials ---
 mkdir -p /home/sandbox/.claude
@@ -39,11 +62,9 @@ fi
 
 # --- CLIProxyAPI — OpenAI-compatible proxy for Claude OAuth ---
 mkdir -p /opt/.cliproxy
-cp /opt/protoresearcher/config/cliproxy-config.yaml /opt/.cliproxy/config.yaml
+cp /opt/quinn/config/cliproxy-config.yaml /opt/.cliproxy/config.yaml
 
-# Function to inject token into CLIProxyAPI config
-# Always writes the config to trigger CLIProxyAPI's file watcher reload,
-# which forces it to re-validate auth state even if the token hasn't changed.
+# Inject OAuth token into CLIProxyAPI config
 inject_token() {
     python3 -c "
 import json, yaml, time, sys
@@ -66,7 +87,6 @@ if cfg.get('claude-api-key'):
 
 cfg['claude-api-key'] = [{'api-key': token}]
 
-# Always rewrite to trigger file watcher (even if token unchanged)
 with open('/opt/.cliproxy/config.yaml', 'w') as f:
     yaml.dump(cfg, f, default_flow_style=False)
 
@@ -77,17 +97,14 @@ else:
 "
 }
 
-# Inject token BEFORE starting CLIProxyAPI so it reads the config with
-# the token already present on boot. The file watcher doesn't reliably
-# detect changes on overlay/tmpfs filesystems.
 inject_token
 
 cli-proxy-api --config /opt/.cliproxy/config.yaml &
 echo "[entrypoint] CLIProxyAPI started on port 8317"
 
-# Wait for CLIProxyAPI to be ready with models
+# Wait for CLIProxyAPI to be ready
 for i in $(seq 1 15); do
-    MODEL_COUNT=$(curl -sf http://127.0.0.1:8317/v1/models -H "Authorization: Bearer protoresearcher-internal" 2>/dev/null | python3 -c "import sys,json; print(len(json.loads(sys.stdin.read()).get('data',[])))" 2>/dev/null || echo "0")
+    MODEL_COUNT=$(curl -sf http://127.0.0.1:8317/v1/models -H "Authorization: Bearer quinn-internal" 2>/dev/null | python3 -c "import sys,json; print(len(json.loads(sys.stdin.read()).get('data',[])))" 2>/dev/null || echo "0")
     if [ "$MODEL_COUNT" -gt "0" ]; then
         echo "[entrypoint] CLIProxyAPI ready ($MODEL_COUNT models)"
         break
@@ -95,13 +112,11 @@ for i in $(seq 1 15); do
     sleep 1
 done
 
-# Set env vars for litellm to route through CLIProxyAPI
-export OPENAI_API_KEY="protoresearcher-internal"
+# Set env vars for LangGraph to route through CLIProxyAPI
+export OPENAI_API_KEY="quinn-internal"
 export OPENAI_API_BASE="http://127.0.0.1:8317/v1"
 
 # --- Token refresh loop ---
-# CLIProxyAPI's file watcher doesn't work on overlay/tmpfs.
-# Instead, we check if the token changed and restart CLIProxyAPI if so.
 (
     LAST_TOKEN=""
     while true; do
@@ -115,7 +130,6 @@ with open('/opt/claude-creds/.credentials.json') as f:
             if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "$LAST_TOKEN" ]; then
                 LAST_TOKEN="$NEW_TOKEN"
                 inject_token
-                # Restart CLIProxyAPI to pick up the new token
                 kill $(pidof cli-proxy-api) 2>/dev/null
                 sleep 1
                 cli-proxy-api --config /opt/.cliproxy/config.yaml &
@@ -126,14 +140,5 @@ with open('/opt/claude-creds/.credentials.json') as f:
 ) &
 echo "[entrypoint] Token refresh watcher started (every 60s)"
 
-# Lab mode setup (if GPU available)
-if [ -n "${LAB_GPU}" ] || command -v nvidia-smi &>/dev/null; then
-    echo "[entrypoint] GPU detected — lab mode available (/lab on)"
-    mkdir -p /sandbox/lab
-    if command -v nvidia-smi &>/dev/null; then
-        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || true
-    fi
-fi
-
-# Start protoResearcher Gradio UI on port 7870
-exec python /opt/protoresearcher/server.py --config /home/sandbox/.nanobot/config.json
+# Start Quinn Gradio UI on port 7870
+exec python /opt/quinn/server.py
