@@ -106,16 +106,11 @@ class KnowledgeStore:
 
     def add_report(
         self,
-        app_name: str,
-        content: str,
-        verdict: str = "PASS",
-        version: str = "",
-        scope: str = "release",
-        checks_total: int = 0,
-        checks_passed: int = 0,
-        checks_failed: int = 0,
-        gaps: int = 0,
-        findings: list[dict] | None = None,
+        title: str,
+        summary: str,
+        app_name: str = "",
+        severity: str = "info",
+        findings: list[str] | None = None,
     ) -> bool:
         """Store a QA verification report."""
         db = self._get_db()
@@ -124,25 +119,20 @@ class KnowledgeStore:
 
         now = self._now_iso()
         cursor = db.execute(
-            """INSERT INTO qa_reports
-               (app_name, version, scope, verdict, checks_total, checks_passed,
-                checks_failed, gaps, content, findings, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                app_name, version, scope, verdict, checks_total, checks_passed,
-                checks_failed, gaps, content, json.dumps(findings or []), now,
-            ),
+            """INSERT INTO qa_reports (title, summary, app_name, severity, findings, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (title, summary, app_name, severity, json.dumps(findings or []), now),
         )
-        embed_text = f"{app_name} {version} {scope} {verdict}\n{content[:500]}"
+        embed_text = f"{title}\n{summary}"
         self._store_vector(db, embed_text, "qa_reports", str(cursor.lastrowid))
         db.commit()
         return True
 
     def get_reports(
-        self, app_name: str | None = None, verdict: str | None = None,
+        self, app_name: str | None = None, severity: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
-        """Get QA reports, optionally filtered by app or verdict."""
+        """Get QA reports, optionally filtered by app or severity."""
         db = self._get_db()
         if db is None:
             return []
@@ -151,9 +141,9 @@ class KnowledgeStore:
         if app_name:
             query += " AND app_name = ?"
             params.append(app_name)
-        if verdict:
-            query += " AND verdict = ?"
-            params.append(verdict)
+        if severity:
+            query += " AND severity = ?"
+            params.append(severity)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         rows = db.execute(query, params).fetchall()

@@ -3,15 +3,10 @@
 -- QA Reports: verification sessions and their results
 CREATE TABLE IF NOT EXISTS qa_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    app_name TEXT NOT NULL,                -- which app was verified
-    version TEXT,                          -- version being tested
-    scope TEXT,                            -- release/regression/endpoint/visual
-    verdict TEXT NOT NULL,                 -- PASS/WARN/FAIL
-    checks_total INTEGER DEFAULT 0,
-    checks_passed INTEGER DEFAULT 0,
-    checks_failed INTEGER DEFAULT 0,
-    gaps INTEGER DEFAULT 0,
-    content TEXT NOT NULL,                 -- full report markdown
+    title TEXT NOT NULL,                   -- report title
+    summary TEXT NOT NULL,                 -- brief summary
+    app_name TEXT,                         -- which app was verified
+    severity TEXT DEFAULT 'info',          -- info/low/medium/high/critical
     findings TEXT,                         -- JSON array of findings
     created_at TEXT NOT NULL
 );
