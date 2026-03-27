@@ -117,7 +117,7 @@ def _build_task_tool(config: LangGraphConfig, all_tools: list[BaseTool]):
     return task
 
 
-def create_researcher_graph(
+def create_quinn_graph(
     config: LangGraphConfig,
     knowledge_store=None,
     include_subagents: bool = True,

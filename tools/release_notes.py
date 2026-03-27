@@ -150,11 +150,13 @@ class ReleaseNotesTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Generate changelogs and draft release notes.\n\n"
+            "Generate changelogs, draft release notes, and manage GitHub releases.\n\n"
             "Actions:\n"
             "- changelog: Build a categorized changelog between two releases\n"
             "- draft_release: Compose full release notes from commits, merged PRs, and board data\n"
-            "- post_to_discord: Send formatted release notes to Discord via webhook\n\n"
+            "- post_to_discord: Send formatted release notes to Discord via webhook\n"
+            "- create_release: Create a GitHub release with tag, title, and notes\n"
+            "- edit_release: Edit the notes of an existing GitHub release\n\n"
             "Default repo from GITHUB_REPO env var (override with repo parameter)."
         )
 
@@ -165,8 +167,23 @@ class ReleaseNotesTool(Tool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["changelog", "draft_release", "post_to_discord"],
+                    "enum": [
+                        "changelog", "draft_release", "post_to_discord",
+                        "create_release", "edit_release",
+                    ],
                     "description": "Action to perform.",
+                },
+                "tag": {
+                    "type": "string",
+                    "description": "Git tag for create_release / edit_release (e.g. 'v0.90.0').",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Release title for create_release (e.g. 'v0.90.0 -- Feature X').",
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Markdown release notes for create_release / edit_release.",
                 },
                 "from_tag": {
                     "type": "string",
@@ -207,6 +224,10 @@ class ReleaseNotesTool(Tool):
                 return await self._draft_release(repo, kwargs)
             elif action == "post_to_discord":
                 return await self._post_to_discord(kwargs)
+            elif action == "create_release":
+                return await self._create_release(repo, kwargs)
+            elif action == "edit_release":
+                return await self._edit_release(repo, kwargs)
             else:
                 return f"Error: Unknown action '{action}'."
         except Exception as e:
@@ -338,3 +359,51 @@ class ReleaseNotesTool(Tool):
             return f"Error posting to Discord: {e}"
 
         return f"Posted release notes to Discord ({len(embeds)} embed(s))."
+
+    async def _create_release(self, repo: str, kwargs: dict[str, Any]) -> str:
+        """Create a GitHub release with a tag, title, and notes."""
+        tag = kwargs.get("tag", "")
+        title = kwargs.get("title", "")
+        notes = kwargs.get("notes", "")
+
+        if not tag:
+            return "Error: 'tag' is required for create_release."
+        if not notes:
+            return "Error: 'notes' is required for create_release."
+
+        args = [
+            "release", "create", tag,
+            "--repo", repo,
+            "--title", title or tag,
+            "--notes", notes,
+        ]
+
+        rc, out, err = await run_gh(args)
+        error = check_gh_error(rc, err)
+        if error:
+            return error
+
+        return f"Created release `{tag}` in {repo}." + (f"\n{out}" if out else "")
+
+    async def _edit_release(self, repo: str, kwargs: dict[str, Any]) -> str:
+        """Edit the notes of an existing GitHub release."""
+        tag = kwargs.get("tag", "")
+        notes = kwargs.get("notes", "")
+
+        if not tag:
+            return "Error: 'tag' is required for edit_release."
+        if not notes:
+            return "Error: 'notes' is required for edit_release."
+
+        args = [
+            "release", "edit", tag,
+            "--repo", repo,
+            "--notes", notes,
+        ]
+
+        rc, out, err = await run_gh(args)
+        error = check_gh_error(rc, err)
+        if error:
+            return error
+
+        return f"Updated release `{tag}` in {repo}."

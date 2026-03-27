@@ -23,7 +23,7 @@ def _read_file(path: str | Path) -> str:
 def build_system_prompt(
     workspace: str = "/sandbox",
     include_subagents: bool = True,
-    research_context: str = "",
+    qa_context: str = "",
 ) -> str:
     """Build the complete system prompt for the lead agent."""
     parts = []
@@ -50,8 +50,8 @@ def build_system_prompt(
         parts.append(_build_subagent_section())
 
     # 4. Dynamic QA context (injected by KnowledgeMiddleware)
-    if research_context:
-        parts.append(f"\n# QA Context\n\n{research_context}")
+    if qa_context:
+        parts.append(f"\n# QA Context\n\n{qa_context}")
 
     # 5. Guidelines
     parts.append("""

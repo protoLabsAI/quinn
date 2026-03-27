@@ -1,7 +1,7 @@
 """
-Reusable Gradio chat UI for protoResearcher.
+Reusable Gradio chat UI for Quinn.
 
-Provides a clean chat interface with a research-themed design.
+Provides a clean chat interface with a QA-themed design.
 Includes settings sidebar with model/tools panels.
 """
 
@@ -35,8 +35,8 @@ CLEAN_CSS = """
     }
 """
 
-# protoResearcher dark theme — emerald/teal accents, research-dark backgrounds
-RESEARCHER_DARK_CSS = """
+# Quinn dark theme — emerald/teal accents, dark backgrounds
+QUINN_DARK_CSS = """
     html { color-scheme: dark !important; }
 
     body, .gradio-container, .main, .wrap, .gap, #component-0 {
@@ -133,7 +133,7 @@ RESEARCHER_DARK_CSS = """
     }
 """
 
-RESEARCHER_PWA_HEAD = """
+QUINN_PWA_HEAD = """
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="alternate icon" href="/static/favicon.svg">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.svg">
@@ -142,17 +142,17 @@ RESEARCHER_PWA_HEAD = """
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="protoResearcher">
+<meta name="apple-mobile-web-app-title" content="Quinn">
 <script>
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () {
         navigator.serviceWorker
             .register('/sw.js', { scope: '/' })
             .then(function (reg) {
-                console.log('[protoResearcher] SW registered:', reg.scope);
+                console.log('[Quinn] SW registered:', reg.scope);
             })
             .catch(function (err) {
-                console.warn('[protoResearcher] SW registration failed:', err);
+                console.warn('[Quinn] SW registration failed:', err);
             });
     });
 }
@@ -177,8 +177,8 @@ def create_chat_app(
     streaming_chat_fn: StreamingChatFn | None = None,
 ) -> gr.Blocks:
     _theme = gr.themes.Soft(primary_hue="teal", neutral_hue="slate")
-    _css = CLEAN_CSS + RESEARCHER_DARK_CSS + extra_css
-    _head = RESEARCHER_PWA_HEAD if pwa else ""
+    _css = CLEAN_CSS + QUINN_DARK_CSS + extra_css
+    _head = QUINN_PWA_HEAD if pwa else ""
 
     def _build() -> gr.Blocks:
         with gr.Blocks(

@@ -1,4 +1,4 @@
-"""Graceful fallback helpers for research tools.
+"""Graceful fallback helpers for QA tools.
 
 Pattern: try primary → catch → fallback with partial result.
 Never silently fail — always log the fallback decision.

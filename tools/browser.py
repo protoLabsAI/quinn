@@ -1,4 +1,4 @@
-"""Browser automation tool for protoResearcher using agent-browser CLI.
+"""Browser automation tool for Quinn using agent-browser CLI.
 
 Provides web browsing capabilities inside the sandbox container.
 Chrome runs with --no-sandbox since the container IS the sandbox.

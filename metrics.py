@@ -1,4 +1,4 @@
-"""Prometheus metrics for protoResearcher.
+"""Prometheus metrics for Quinn.
 
 Exposes /metrics endpoint for scraping by Prometheus.
 Falls back silently if prometheus-client is not installed.
@@ -23,27 +23,27 @@ def init():
         from prometheus_client import Counter, Histogram, Gauge
 
         _llm_calls = Counter(
-            "protoresearcher_llm_calls_total", "Total LLM API calls",
+            "quinn_llm_calls_total", "Total LLM API calls",
             ["model", "finish_reason"],
         )
         _llm_latency = Histogram(
-            "protoresearcher_llm_latency_seconds", "LLM call latency",
+            "quinn_llm_latency_seconds", "LLM call latency",
             ["model"], buckets=[0.5, 1, 2, 5, 10, 20, 30, 60, 120],
         )
         _llm_tokens = Counter(
-            "protoresearcher_llm_tokens_total", "Total LLM tokens consumed",
+            "quinn_llm_tokens_total", "Total LLM tokens consumed",
             ["model", "direction"],
         )
         _tool_calls = Counter(
-            "protoresearcher_tool_calls_total", "Total tool executions",
+            "quinn_tool_calls_total", "Total tool executions",
             ["tool_name", "success"],
         )
         _tool_latency = Histogram(
-            "protoresearcher_tool_latency_seconds", "Tool execution latency",
+            "quinn_tool_latency_seconds", "Tool execution latency",
             ["tool_name"], buckets=[0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30],
         )
         _active_sessions = Gauge(
-            "protoresearcher_active_sessions", "Active chat sessions",
+            "quinn_active_sessions", "Active chat sessions",
         )
         _enabled = True
         print("[metrics] Prometheus metrics initialized")

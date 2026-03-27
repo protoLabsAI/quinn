@@ -1,4 +1,4 @@
-"""Langfuse tracing for protoResearcher.
+"""Langfuse tracing for Quinn.
 
 Provides trace/span context for LLM calls and tool executions.
 Compatible with Langfuse 4.x API (start_as_current_observation).
@@ -46,7 +46,7 @@ def is_enabled() -> bool:
     return _enabled
 
 
-def start_trace(session_id: str, name: str = "researcher-chat", metadata: dict | None = None) -> Any:
+def start_trace(session_id: str, name: str = "quinn-chat", metadata: dict | None = None) -> Any:
     """Start a new trace for a chat session."""
     if not _enabled:
         return None
@@ -62,7 +62,7 @@ def start_trace(session_id: str, name: str = "researcher-chat", metadata: dict |
             metadata={
                 **(metadata or {}),
                 "session_id": session_id,
-                "tags": ["protoresearcher"],
+                "tags": ["quinn"],
             },
         )
         return span

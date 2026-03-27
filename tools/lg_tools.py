@@ -1,6 +1,6 @@
 """LangGraph tool adapters for Quinn QA agent.
 
-Wraps existing nanobot Tool classes as LangChain @tool functions.
+Wraps existing Tool classes as LangChain @tool functions.
 All business logic stays in the original classes — these are thin adapters.
 """
 
@@ -10,6 +10,7 @@ from tools.board_monitor import BoardMonitorTool
 from tools.browser import BrowserTool
 from tools.discord_admin import DiscordAdminTool
 from tools.discord_feed import DiscordFeedTool
+from tools.github_actions import GitHubActionsTool
 from tools.github_issues import GitHubIssuesTool
 from tools.pr_inspector import PrInspectorTool
 from tools.release_notes import ReleaseNotesTool
@@ -20,6 +21,7 @@ _board_monitor = BoardMonitorTool()
 _browser = BrowserTool()
 _discord_admin = DiscordAdminTool()
 _discord_feed = DiscordFeedTool()
+_github_actions = GitHubActionsTool()
 _github_issues = GitHubIssuesTool()
 _pr_inspector = PrInspectorTool()
 _release_notes = ReleaseNotesTool()
@@ -153,6 +155,39 @@ async def discord_feed(
 
 
 # ---------------------------------------------------------------------------
+# GitHub Actions
+# ---------------------------------------------------------------------------
+
+@tool
+async def github_actions(
+    action: str,
+    workflow: str = "",
+    run_id: int = 0,
+    ref: str = "",
+    repo: str = "",
+) -> str:
+    """Manage GitHub Actions CI workflows.
+
+    Actions:
+    - list_workflows: List available workflows with name and state
+    - trigger_workflow: Trigger a workflow on a branch (requires workflow)
+    - list_runs: List recent runs for a workflow (requires workflow)
+    - view_run: View status, conclusion, and jobs for a run (requires run_id)
+    - rerun_failed: Rerun only the failed jobs of a run (requires run_id)
+    - run_logs: Get failure logs from a run, truncated to 3000 chars (requires run_id)
+    - run_tests: Trigger checks.yml, poll until complete, return pass/fail summary
+    """
+    kwargs: dict = {"action": action, "repo": repo}
+    if workflow:
+        kwargs["workflow"] = workflow
+    if run_id:
+        kwargs["run_id"] = run_id
+    if ref:
+        kwargs["ref"] = ref
+    return await _github_actions.execute(**kwargs)
+
+
+# ---------------------------------------------------------------------------
 # GitHub Issues
 # ---------------------------------------------------------------------------
 
@@ -193,19 +228,25 @@ async def github_issues(
 async def pr_inspector(
     action: str,
     pr_number: int = 0,
+    body: str = "",
     repo: str = "",
 ) -> str:
-    """Inspect GitHub pull requests for CI status, code review threads, and diffs.
+    """Inspect and review GitHub pull requests.
 
     Actions:
     - list_open: List open PRs with title, branch, and CI status
     - check_ci: Show CI check results for a specific PR (requires pr_number)
     - coderabbit_threads: Show unresolved review threads on a PR (requires pr_number)
     - diff_summary: Show first 200 lines of PR diff (requires pr_number)
+    - review_comment: Leave a review comment on a PR (requires pr_number, body)
+    - review_approve: Approve a PR with an optional comment (requires pr_number)
+    - review_request_changes: Request changes on a PR (requires pr_number, body)
     """
     kwargs: dict = {"action": action, "repo": repo}
     if pr_number:
         kwargs["pr_number"] = pr_number
+    if body:
+        kwargs["body"] = body
     return await _pr_inspector.execute(**kwargs)
 
 
@@ -221,18 +262,24 @@ async def release_notes(
     since_date: str = "",
     content: str = "",
     version: str = "",
+    tag: str = "",
+    title: str = "",
+    notes: str = "",
     repo: str = "",
 ) -> str:
-    """Generate changelogs and draft release notes.
+    """Generate changelogs, draft release notes, and manage GitHub releases.
 
     Actions:
     - changelog: Build a categorized changelog between two releases (from_tag, to_tag)
     - draft_release: Compose full release notes from commits, merged PRs, and board data
     - post_to_discord: Send formatted release notes to Discord via webhook (requires content)
+    - create_release: Create a GitHub release (requires tag, notes; title optional)
+    - edit_release: Edit the notes of an existing release (requires tag, notes)
     """
     return await _release_notes.execute(
         action=action, from_tag=from_tag, to_tag=to_tag,
-        since_date=since_date, content=content, version=version, repo=repo,
+        since_date=since_date, content=content, version=version,
+        tag=tag, title=title, notes=notes, repo=repo,
     )
 
 
@@ -302,6 +349,7 @@ def get_all_tools(qa_store=None):
         browser,
         discord_admin,
         discord_feed,
+        github_actions,
         github_issues,
         pr_inspector,
         release_notes,

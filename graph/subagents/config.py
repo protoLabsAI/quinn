@@ -38,7 +38,7 @@ Rules:
 - Do NOT fix anything — just report what you found
 - Do NOT store to knowledge base — return the triage report to the main agent
 """,
-    tools=["board_monitor", "pr_inspector", "github_issues"],
+    tools=["board_monitor", "pr_inspector", "github_issues", "github_actions"],
     max_turns=30,
 )
 

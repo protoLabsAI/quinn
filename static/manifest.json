@@ -1,7 +1,7 @@
 {
-  "name": "protoResearcher — protoLabs",
-  "short_name": "protoResearcher",
-  "description": "AI research agent by protoLabs — tracks the latest in AI/ML",
+  "name": "Quinn — protoLabs",
+  "short_name": "Quinn",
+  "description": "QA agent by protoLabs — monitors apps, triages bugs, generates release notes",
   "start_url": "/",
   "display": "standalone",
   "theme_color": "#14b8a6",

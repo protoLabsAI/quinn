@@ -1,13 +1,13 @@
-// protoResearcher — service worker (offline fallback)
+// Quinn — service worker (offline fallback)
 
-const CACHE_NAME = "protoresearcher-v1";
+const CACHE_NAME = "quinn-v1";
 
 const OFFLINE_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>protoResearcher — Offline</title>
+  <title>Quinn — Offline</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -67,8 +67,8 @@ const OFFLINE_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <div class="card">
-    <div class="logo">R</div>
-    <h1>protoResearcher is offline</h1>
+    <div class="logo">Q</div>
+    <h1>Quinn is offline</h1>
     <p>Check your connection and try again.</p>
     <button class="retry-btn" onclick="window.location.reload()">Retry</button>
     <p class="brand">protoLabs.studio</p>

@@ -1,4 +1,4 @@
-"""Audit logging for protoResearcher tool executions.
+"""Audit logging for Quinn tool executions.
 
 Writes JSONL entries to /sandbox/audit/audit.jsonl with tool call metadata.
 Enhanced with Langfuse trace context for cross-referencing.

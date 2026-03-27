@@ -1,7 +1,7 @@
 """KnowledgeMiddleware — injects relevant knowledge context before LLM calls.
 
 Queries the KnowledgeStore with the last user message and adds
-top-k results to the state's research_context field.
+top-k results to the state's qa_context field.
 """
 
 from langchain.agents.middleware import AgentMiddleware
@@ -40,11 +40,11 @@ class KnowledgeMiddleware(AgentMiddleware):
             return None
 
         # Format context
-        context_parts = ["[Relevant knowledge from previous research:]"]
+        context_parts = ["[Relevant knowledge from previous QA sessions:]"]
         for r in results:
             context_parts.append(f"- [{r['table']}] {r['preview']}")
 
-        return {"research_context": "\n".join(context_parts)}
+        return {"qa_context": "\n".join(context_parts)}
 
     async def abefore_model(self, state, runtime) -> dict | None:
         """Async version — same logic."""

@@ -24,12 +24,15 @@ class PrInspectorTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Inspect GitHub pull requests for CI status, code review threads, and diffs.\n\n"
+            "Inspect and review GitHub pull requests.\n\n"
             "Actions:\n"
             "- list_open: List open PRs with title, branch, and CI status\n"
             "- check_ci: Show CI check results for a specific PR\n"
             "- coderabbit_threads: Show unresolved review threads on a PR\n"
-            "- diff_summary: Show first 200 lines of PR diff\n\n"
+            "- diff_summary: Show first 200 lines of PR diff\n"
+            "- review_comment: Leave a review comment on a PR (requires pr_number, body)\n"
+            "- review_approve: Approve a PR with an optional comment (requires pr_number)\n"
+            "- review_request_changes: Request changes on a PR (requires pr_number, body)\n\n"
             "Default repo from GITHUB_REPO env var (override with repo parameter)."
         )
 
@@ -40,12 +43,19 @@ class PrInspectorTool(Tool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list_open", "check_ci", "coderabbit_threads", "diff_summary"],
+                    "enum": [
+                        "list_open", "check_ci", "coderabbit_threads", "diff_summary",
+                        "review_comment", "review_approve", "review_request_changes",
+                    ],
                     "description": "Action to perform.",
                 },
                 "pr_number": {
                     "type": "integer",
-                    "description": "PR number (required for check_ci, coderabbit_threads, diff_summary).",
+                    "description": "PR number (required for all actions except list_open).",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Review comment body (required for review_comment and review_request_changes, optional for review_approve).",
                 },
                 "repo": {
                     "type": "string",
@@ -59,6 +69,7 @@ class PrInspectorTool(Tool):
         action = kwargs["action"]
         repo = kwargs.get("repo") or get_repo()
         pr_number = kwargs.get("pr_number")
+        body = kwargs.get("body", "")
 
         if action == "list_open":
             return await self._list_open(repo)
@@ -74,6 +85,22 @@ class PrInspectorTool(Tool):
             if not pr_number:
                 return "Error: 'pr_number' is required for diff_summary."
             return await self._diff_summary(repo, pr_number)
+        elif action == "review_comment":
+            if not pr_number:
+                return "Error: 'pr_number' is required for review_comment."
+            if not body:
+                return "Error: 'body' is required for review_comment."
+            return await self._review(repo, pr_number, "comment", body)
+        elif action == "review_approve":
+            if not pr_number:
+                return "Error: 'pr_number' is required for review_approve."
+            return await self._review(repo, pr_number, "approve", body)
+        elif action == "review_request_changes":
+            if not pr_number:
+                return "Error: 'pr_number' is required for review_request_changes."
+            if not body:
+                return "Error: 'body' is required for review_request_changes."
+            return await self._review(repo, pr_number, "request-changes", body)
         else:
             return f"Error: Unknown action '{action}'."
 
@@ -194,6 +221,33 @@ class PrInspectorTool(Tool):
             suffix = f"\n\n_...truncated ({len(diff_lines)} total lines)_"
 
         return f"**Diff for PR#{pr_number}:**\n\n```diff\n{preview}\n```{suffix}"
+
+
+    async def _review(self, repo: str, pr_number: int, review_type: str, body: str) -> str:
+        """Submit a PR review (comment, approve, or request-changes)."""
+        args = [
+            "pr", "review",
+            str(pr_number),
+            "--repo", repo,
+            f"--{review_type}",
+        ]
+        if body:
+            args.extend(["--body", body])
+        elif review_type == "approve":
+            args.extend(["--body", "Approved by Quinn QA."])
+
+        rc, out, err = await run_gh(args)
+        error = check_gh_error(rc, err)
+        if error:
+            return error
+
+        action_labels = {
+            "comment": "Commented on",
+            "approve": "Approved",
+            "request-changes": "Requested changes on",
+        }
+        label = action_labels.get(review_type, "Reviewed")
+        return f"{label} PR#{pr_number} in {repo}."
 
 
 def _summarize_checks(checks: list[dict[str, Any]]) -> str:

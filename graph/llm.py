@@ -1,4 +1,4 @@
-"""LLM factory for protoResearcher LangGraph agent.
+"""LLM factory for Quinn LangGraph agent.
 
 Both vLLM and Claude route through OpenAI-compatible endpoints,
 so we use ChatOpenAI for everything.
@@ -39,7 +39,7 @@ def create_llm(config: LangGraphConfig) -> ChatOpenAI:
         api_key = "none"
     elif config.model_provider == "cliproxy":
         api_base = config.api_base or "http://127.0.0.1:8317/v1"
-        api_key = config.api_key or "protoresearcher-internal"
+        api_key = config.api_key or "quinn-internal"
     else:
         api_base = config.api_base
         api_key = config.api_key

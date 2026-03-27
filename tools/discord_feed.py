@@ -1,9 +1,9 @@
-"""Discord feed tool for protoResearcher.
+"""Discord feed tool for Quinn.
 
 Reads messages from Discord channels via the REST API, extracts URLs,
-and classifies them for the research pipeline (arxiv, HF, GitHub, blogs).
+and classifies them for the QA pipeline (arxiv, HF, GitHub, blogs).
 
-Requires DISCORD_BOT_TOKEN env var. Channel IDs configured in research-config.json.
+Requires DISCORD_BOT_TOKEN env var. Channel IDs configured in qa-config.json.
 """
 
 import os
@@ -346,7 +346,7 @@ class DiscordFeedTool(Tool):
         other_links = [l for l in unique_links if l["type"] == "link"]
 
         lines = [
-            f"**Discord Research Digest** — {len(messages)} messages, {len(unique_links)} unique links\n"
+            f"**Discord QA Digest** — {len(messages)} messages, {len(unique_links)} unique links\n"
         ]
 
         if arxiv_links:
@@ -356,13 +356,13 @@ class DiscordFeedTool(Tool):
                 match = re.search(r'(\d{4}\.\d{4,5})', l["url"])
                 aid = match.group(1) if match else ""
                 lines.append(f"- [{aid}]({l['url']})")
-            lines.append(f"\n_Tip: Use `browser` to fetch these papers, or rabbit-hole MCP to ingest them._\n")
+            lines.append("")
 
         if hf_links:
             lines.append(f"**HuggingFace ({len(hf_links)}):**")
             for l in hf_links:
                 lines.append(f"- {l['url']}")
-            lines.append(f"\n_Tip: Use `huggingface` tool to get model cards._\n")
+            lines.append("")
 
         if gh_links:
             lines.append(f"**GitHub ({len(gh_links)}):**")
@@ -430,7 +430,7 @@ class DiscordFeedTool(Tool):
                 for batch_start in range(0, len(embeds), 10):
                     batch = embeds[batch_start:batch_start + 10]
                     payload = {
-                        "username": "protoResearcher",
+                        "username": "Quinn QA",
                         "embeds": batch,
                     }
                     resp = await client.post(webhook_url, json=payload)

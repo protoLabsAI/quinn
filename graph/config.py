@@ -27,15 +27,15 @@ class LangGraphConfig:
 
     # Subagents
     auditor: SubagentDef = field(default_factory=lambda: SubagentDef(
-        tools=["discord_feed", "github_trending", "browser", "web_search"],
+        tools=["board_monitor", "pr_inspector", "github_issues"],
         max_turns=30,
     ))
     verifier: SubagentDef = field(default_factory=lambda: SubagentDef(
-        tools=["browser", "web_fetch", "qa_memory"],
+        tools=["qa_memory", "browser"],
         max_turns=40,
     ))
     reporter: SubagentDef = field(default_factory=lambda: SubagentDef(
-        tools=["qa_memory", "discord_feed"],
+        tools=["qa_memory", "discord_feed", "release_notes"],
         max_turns=20,
     ))
 

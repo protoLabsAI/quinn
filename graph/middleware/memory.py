@@ -14,7 +14,7 @@ from langgraph.prebuilt.chat_agent_executor import AgentState
 
 
 class MemoryMiddleware(AgentMiddleware):
-    """Extract and store research findings after agent responses."""
+    """Extract and store QA findings after agent responses."""
 
     def __init__(self, knowledge_store):
         super().__init__()

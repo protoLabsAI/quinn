@@ -222,8 +222,7 @@ Quinn monitors multiple apps in your protoLabs Studio portfolio. Configure in `c
 
 Quinn is part of the [protoLabs](https://protolabs.studio) autonomous development studio.
 
-| Agent               | Role                                              |
-| ------------------- | ------------------------------------------------- |
-| **Ava**             | Chief of Staff — orchestration and strategy       |
-| **Quinn**           | QA Engineer — verification and release management |
-| **protoResearcher** | Research — AI/ML paper tracking and analysis      |
+| Agent     | Role                                             |
+| --------- | ------------------------------------------------ |
+| **Ava**   | Chief of Staff — orchestration and strategy      |
+| **Quinn** | QA Engineer — testing, triage, and release notes |

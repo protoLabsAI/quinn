@@ -20,6 +20,7 @@ import re
 import threading
 import time
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -50,6 +51,9 @@ _MOD_LOG_CHANNEL_ID = os.environ.get("MODERATION_LOG_CHANNEL_ID", "")
 # GUILDS (1<<0) | GUILD_MEMBERS (1<<1) | GUILD_MESSAGES (1<<9)
 # | GUILD_MESSAGE_REACTIONS (1<<10) | MESSAGE_CONTENT (1<<15)
 _GATEWAY_INTENTS = (1 << 0) | (1 << 1) | (1 << 9) | (1 << 10) | (1 << 15)
+
+# Daily digest scheduling -- 2 PM UTC = 7 AM PT by default
+_DIGEST_HOUR = int(os.environ.get("DIGEST_HOUR_UTC", "14"))
 
 MODERATION_CONFIG: dict[str, Any] = {
     "spam_patterns": [
@@ -708,6 +712,32 @@ async def post_daily_digest(channel_id: str | None = None):
 
 
 # ---------------------------------------------------------------------------
+# Daily digest scheduler
+# ---------------------------------------------------------------------------
+
+
+async def _daily_digest_scheduler():
+    """Run post_daily_digest() once per day at DIGEST_HOUR_UTC."""
+    while True:
+        now = datetime.now(timezone.utc)
+        target = now.replace(hour=_DIGEST_HOUR, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        wait_seconds = (target - now).total_seconds()
+        log.info(
+            "Next daily digest in %.1f hours (at %s)",
+            wait_seconds / 3600,
+            target.strftime("%H:%M UTC"),
+        )
+        await asyncio.sleep(wait_seconds)
+        try:
+            await post_daily_digest()
+            log.info("Daily digest posted successfully")
+        except Exception as e:
+            log.error("Daily digest failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Gateway WebSocket connection
 # ---------------------------------------------------------------------------
 
@@ -804,6 +834,7 @@ async def _run_gateway():
                         if t == "READY":
                             guilds = d.get("guilds", [])
                             log.info("Gateway READY -- %d guild(s)", len(guilds))
+                            asyncio.create_task(_daily_digest_scheduler())
 
                         elif t == "MESSAGE_REACTION_ADD":
                             asyncio.create_task(_safe_dispatch(_handle_reaction, d, bot_id))
