@@ -18,56 +18,24 @@ import httpx
 
 from nanobot.agent.tools.base import Tool
 
-_DEFAULT_REPO = "protoLabsAI/protoMaker"
-_COMMAND_TIMEOUT = 30
+from tools.gh_cli import check_gh_error, get_repo, run_gh
+
 _DISCORD_EMBED_COLOR = 0x14B8A6
-
-
-def _repo() -> str:
-    return os.environ.get("GITHUB_REPO", _DEFAULT_REPO)
 
 
 def _webhook_url() -> str:
     return os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 
-async def _run_gh(args: list[str], timeout: int = _COMMAND_TIMEOUT) -> tuple[int, str, str]:
-    """Execute a gh CLI command and return (returncode, stdout, stderr)."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "gh", *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return (
-            proc.returncode or 0,
-            stdout.decode(errors="replace").strip(),
-            stderr.decode(errors="replace").strip(),
-        )
-    except asyncio.TimeoutError:
-        proc.kill()  # type: ignore[union-attr]
-        return 1, "", f"Command timed out after {timeout}s"
-    except FileNotFoundError:
-        return 1, "", "gh CLI is not installed or not in PATH."
-
-
-def _check_gh_error(returncode: int, stderr: str) -> str | None:
-    """Return a formatted error string if the command failed, else None."""
-    if returncode != 0:
-        return f"Error (exit {returncode}): {stderr[:500]}"
-    return None
-
-
 async def _get_recent_tags(repo: str, limit: int = 5) -> list[dict[str, str]] | str:
     """Fetch recent releases/tags from GitHub."""
-    rc, out, err = await _run_gh([
+    rc, out, err = await run_gh([
         "release", "list",
         "--repo", repo,
         "--limit", str(limit),
         "--json", "tagName,name,publishedAt,isPrerelease",
     ])
-    error = _check_gh_error(rc, err)
+    error = check_gh_error(rc, err)
     if error:
         return error
 
@@ -82,12 +50,12 @@ async def _get_recent_tags(repo: str, limit: int = 5) -> list[dict[str, str]] | 
 
 async def _get_commits_between(repo: str, from_tag: str, to_tag: str) -> str:
     """Get commit log between two tags using gh api."""
-    rc, out, err = await _run_gh([
+    rc, out, err = await run_gh([
         "api",
         f"repos/{repo}/compare/{from_tag}...{to_tag}",
-        "--jq", ".commits[] | .commit.message | split(\"\\n\") | .[0]",
+        "--jq", '.commits[] | .commit.message | split("\\n") | .[0]',
     ])
-    error = _check_gh_error(rc, err)
+    error = check_gh_error(rc, err)
     if error:
         return error
     return out or "No commits found between these tags."
@@ -95,7 +63,7 @@ async def _get_commits_between(repo: str, from_tag: str, to_tag: str) -> str:
 
 async def _get_merged_prs(repo: str, since_date: str) -> list[dict[str, Any]] | str:
     """Get PRs merged since a date."""
-    rc, out, err = await _run_gh([
+    rc, out, err = await run_gh([
         "pr", "list",
         "--repo", repo,
         "--state", "merged",
@@ -103,7 +71,7 @@ async def _get_merged_prs(repo: str, since_date: str) -> list[dict[str, Any]] | 
         "--json", "number,title,mergedAt,headRefName,author",
         "--limit", "50",
     ])
-    error = _check_gh_error(rc, err)
+    error = check_gh_error(rc, err)
     if error:
         return error
 
@@ -119,20 +87,18 @@ async def _get_merged_prs(repo: str, since_date: str) -> list[dict[str, Any]] | 
 def _categorize_commit(message: str) -> str:
     """Categorize a commit message by conventional commit prefix."""
     lower = message.lower().strip()
-    if lower.startswith("feat"):
-        return "Features"
-    elif lower.startswith("fix"):
-        return "Bug Fixes"
-    elif lower.startswith("refactor"):
-        return "Refactoring"
-    elif lower.startswith("docs"):
-        return "Documentation"
-    elif lower.startswith("test"):
-        return "Tests"
-    elif lower.startswith("chore"):
-        return "Chores"
-    elif lower.startswith("ci"):
-        return "CI"
+    prefixes = [
+        ("feat", "Features"),
+        ("fix", "Bug Fixes"),
+        ("refactor", "Refactoring"),
+        ("docs", "Documentation"),
+        ("test", "Tests"),
+        ("chore", "Chores"),
+        ("ci", "CI"),
+    ]
+    for prefix, category in prefixes:
+        if lower.startswith(prefix):
+            return category
     return "Other"
 
 
@@ -150,8 +116,11 @@ def _build_changelog(commits_text: str, from_tag: str, to_tag: str) -> str:
 
     lines = [f"## Changelog: {from_tag} -> {to_tag}\n"]
 
-    # Ordered categories — features first, chores last
-    priority = ["Features", "Bug Fixes", "Refactoring", "Documentation", "Tests", "CI", "Chores", "Other"]
+    # Ordered: features first, chores last
+    priority = [
+        "Features", "Bug Fixes", "Refactoring", "Documentation",
+        "Tests", "CI", "Chores", "Other",
+    ]
     for category in priority:
         group = by_category.pop(category, [])
         if group:
@@ -160,7 +129,6 @@ def _build_changelog(commits_text: str, from_tag: str, to_tag: str) -> str:
                 lines.append(f"- {commit}")
             lines.append("")
 
-    # Any remaining categories
     for category, group in sorted(by_category.items()):
         if group:
             lines.append(f"### {category}")
@@ -187,7 +155,7 @@ class ReleaseNotesTool(Tool):
             "- changelog: Build a categorized changelog between two releases\n"
             "- draft_release: Compose full release notes from commits, merged PRs, and board data\n"
             "- post_to_discord: Send formatted release notes to Discord via webhook\n\n"
-            f"Default repo: {_DEFAULT_REPO} (override with GITHUB_REPO env var)."
+            "Default repo from GITHUB_REPO env var (override with repo parameter)."
         )
 
     @property
@@ -222,7 +190,7 @@ class ReleaseNotesTool(Tool):
                 },
                 "repo": {
                     "type": "string",
-                    "description": f"Repository in owner/name format (default: {_DEFAULT_REPO}).",
+                    "description": "Repository in owner/name format.",
                 },
             },
             "required": ["action"],
@@ -230,7 +198,7 @@ class ReleaseNotesTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         action = kwargs["action"]
-        repo = kwargs.get("repo") or _repo()
+        repo = kwargs.get("repo") or get_repo()
 
         try:
             if action == "changelog":
@@ -255,7 +223,10 @@ class ReleaseNotesTool(Tool):
             if isinstance(tags, str):
                 return tags
             if len(tags) < 2:
-                return "Error: Need at least 2 releases to generate a changelog. Provide from_tag and to_tag."
+                return (
+                    "Error: Need at least 2 releases to generate a changelog. "
+                    "Provide from_tag and to_tag."
+                )
             if not to_tag:
                 to_tag = tags[0].get("tagName", "")
             if not from_tag:
@@ -278,9 +249,10 @@ class ReleaseNotesTool(Tool):
             since_date = week_ago.strftime("%Y-%m-%d")
 
         # Gather data in parallel
-        tags_task = _get_recent_tags(repo, limit=3)
-        prs_task = _get_merged_prs(repo, since_date)
-        tags_result, prs_result = await asyncio.gather(tags_task, prs_task)
+        tags_result, prs_result = await asyncio.gather(
+            _get_recent_tags(repo, limit=3),
+            _get_merged_prs(repo, since_date),
+        )
 
         lines: list[str] = []
 

@@ -1,55 +1,21 @@
 """GitHub PR inspection tool for Quinn QA agent.
 
-Analyzes pull requests using the gh CLI — CI status, unresolved review threads,
+Analyzes pull requests using the gh CLI -- CI status, unresolved review threads,
 diff summaries, and open PR listings.
 
 Requires: gh CLI authenticated and GITHUB_REPO env var (default: protoLabsAI/protoMaker).
 """
 
-import asyncio
-import os
+import json
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
 
-_DEFAULT_REPO = "protoLabsAI/protoMaker"
-_COMMAND_TIMEOUT = 30
-
-
-def _repo() -> str:
-    return os.environ.get("GITHUB_REPO", _DEFAULT_REPO)
-
-
-async def _run_gh(args: list[str], timeout: int = _COMMAND_TIMEOUT) -> tuple[int, str, str]:
-    """Execute a gh CLI command and return (returncode, stdout, stderr)."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "gh", *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return (
-            proc.returncode or 0,
-            stdout.decode(errors="replace").strip(),
-            stderr.decode(errors="replace").strip(),
-        )
-    except asyncio.TimeoutError:
-        proc.kill()  # type: ignore[union-attr]
-        return 1, "", f"Command timed out after {timeout}s"
-    except FileNotFoundError:
-        return 1, "", "gh CLI is not installed or not in PATH."
-
-
-def _check_gh_error(returncode: int, stderr: str) -> str | None:
-    """Return a formatted error string if the command failed, else None."""
-    if returncode != 0:
-        return f"Error (exit {returncode}): {stderr[:500]}"
-    return None
+from tools.gh_cli import check_gh_error, get_repo, run_gh
 
 
 class PrInspectorTool(Tool):
-    """Inspect GitHub pull requests — CI, reviews, diffs."""
+    """Inspect GitHub pull requests -- CI, reviews, diffs."""
 
     @property
     def name(self) -> str:
@@ -64,7 +30,7 @@ class PrInspectorTool(Tool):
             "- check_ci: Show CI check results for a specific PR\n"
             "- coderabbit_threads: Show unresolved review threads on a PR\n"
             "- diff_summary: Show first 200 lines of PR diff\n\n"
-            f"Default repo: {_DEFAULT_REPO} (override with GITHUB_REPO env var)."
+            "Default repo from GITHUB_REPO env var (override with repo parameter)."
         )
 
     @property
@@ -83,7 +49,7 @@ class PrInspectorTool(Tool):
                 },
                 "repo": {
                     "type": "string",
-                    "description": f"Repository in owner/name format (default: {_DEFAULT_REPO}).",
+                    "description": "Repository in owner/name format.",
                 },
             },
             "required": ["action"],
@@ -91,7 +57,7 @@ class PrInspectorTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         action = kwargs["action"]
-        repo = kwargs.get("repo") or _repo()
+        repo = kwargs.get("repo") or get_repo()
         pr_number = kwargs.get("pr_number")
 
         if action == "list_open":
@@ -113,21 +79,20 @@ class PrInspectorTool(Tool):
 
     async def _list_open(self, repo: str) -> str:
         """List open PRs with metadata."""
-        rc, out, err = await _run_gh([
+        rc, out, err = await run_gh([
             "pr", "list",
             "--repo", repo,
             "--state", "open",
             "--json", "number,title,headRefName,statusCheckRollup,updatedAt",
             "--limit", "30",
         ])
-        error = _check_gh_error(rc, err)
+        error = check_gh_error(rc, err)
         if error:
             return error
 
         if not out:
             return "No open PRs found."
 
-        import json
         try:
             prs = json.loads(out)
         except json.JSONDecodeError:
@@ -143,7 +108,6 @@ class PrInspectorTool(Tool):
             branch = pr.get("headRefName", "?")
             updated = pr.get("updatedAt", "")[:10]
 
-            # Summarize CI status
             checks = pr.get("statusCheckRollup", []) or []
             ci_summary = _summarize_checks(checks)
 
@@ -153,13 +117,13 @@ class PrInspectorTool(Tool):
 
     async def _check_ci(self, repo: str, pr_number: int) -> str:
         """Show CI check results for a PR."""
-        rc, out, err = await _run_gh([
+        rc, out, err = await run_gh([
             "pr", "checks",
             str(pr_number),
             "--repo", repo,
         ])
-        error = _check_gh_error(rc, err)
-        # gh pr checks returns exit 1 when checks fail — that's valid output
+        error = check_gh_error(rc, err)
+        # gh pr checks returns exit 1 when checks fail -- that is valid output
         if error and not out:
             return error
 
@@ -170,17 +134,16 @@ class PrInspectorTool(Tool):
 
     async def _coderabbit_threads(self, repo: str, pr_number: int) -> str:
         """Show unresolved review threads."""
-        rc, out, err = await _run_gh([
+        rc, out, err = await run_gh([
             "pr", "view",
             str(pr_number),
             "--repo", repo,
             "--json", "reviewThreads",
         ])
-        error = _check_gh_error(rc, err)
+        error = check_gh_error(rc, err)
         if error:
             return error
 
-        import json
         try:
             data = json.loads(out)
         except json.JSONDecodeError:
@@ -210,19 +173,18 @@ class PrInspectorTool(Tool):
 
     async def _diff_summary(self, repo: str, pr_number: int) -> str:
         """Show first 200 lines of a PR diff."""
-        rc, out, err = await _run_gh([
+        rc, out, err = await run_gh([
             "pr", "diff",
             str(pr_number),
             "--repo", repo,
         ])
-        error = _check_gh_error(rc, err)
+        error = check_gh_error(rc, err)
         if error:
             return error
 
         if not out:
             return f"No diff found for PR#{pr_number}."
 
-        # Limit to first 200 lines
         diff_lines = out.split("\n")
         truncated = len(diff_lines) > 200
         preview = "\n".join(diff_lines[:200])

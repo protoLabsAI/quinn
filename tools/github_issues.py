@@ -1,52 +1,17 @@
 """GitHub issue triage tool for Quinn QA agent.
 
-Manages GitHub issues — listing, labeling, commenting, and closing —
+Manages GitHub issues -- listing, labeling, commenting, and closing --
 using the gh CLI for authentication and API access.
 
 Requires: gh CLI authenticated and GITHUB_REPO env var (default: protoLabsAI/protoMaker).
 """
 
-import asyncio
 import json
-import os
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
 
-_DEFAULT_REPO = "protoLabsAI/protoMaker"
-_COMMAND_TIMEOUT = 30
-
-
-def _repo() -> str:
-    return os.environ.get("GITHUB_REPO", _DEFAULT_REPO)
-
-
-async def _run_gh(args: list[str], timeout: int = _COMMAND_TIMEOUT) -> tuple[int, str, str]:
-    """Execute a gh CLI command and return (returncode, stdout, stderr)."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "gh", *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return (
-            proc.returncode or 0,
-            stdout.decode(errors="replace").strip(),
-            stderr.decode(errors="replace").strip(),
-        )
-    except asyncio.TimeoutError:
-        proc.kill()  # type: ignore[union-attr]
-        return 1, "", f"Command timed out after {timeout}s"
-    except FileNotFoundError:
-        return 1, "", "gh CLI is not installed or not in PATH."
-
-
-def _check_gh_error(returncode: int, stderr: str) -> str | None:
-    """Return a formatted error string if the command failed, else None."""
-    if returncode != 0:
-        return f"Error (exit {returncode}): {stderr[:500]}"
-    return None
+from tools.gh_cli import check_gh_error, get_repo, run_gh
 
 
 def _format_issue(issue: dict[str, Any]) -> str:
@@ -72,7 +37,7 @@ def _format_issue(issue: dict[str, Any]) -> str:
 
 
 class GitHubIssuesTool(Tool):
-    """Triage GitHub issues — list, label, comment, and close."""
+    """Triage GitHub issues -- list, label, comment, and close."""
 
     @property
     def name(self) -> str:
@@ -87,7 +52,7 @@ class GitHubIssuesTool(Tool):
             "- close: Close an issue with a reason comment\n"
             "- comment: Add a comment to an issue\n"
             "- label: Add a label to an issue\n\n"
-            f"Default repo: {_DEFAULT_REPO} (override with GITHUB_REPO env var)."
+            "Default repo from GITHUB_REPO env var (override with repo parameter)."
         )
 
     @property
@@ -118,7 +83,7 @@ class GitHubIssuesTool(Tool):
                 },
                 "repo": {
                     "type": "string",
-                    "description": f"Repository in owner/name format (default: {_DEFAULT_REPO}).",
+                    "description": "Repository in owner/name format.",
                 },
             },
             "required": ["action"],
@@ -126,7 +91,7 @@ class GitHubIssuesTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         action = kwargs["action"]
-        repo = kwargs.get("repo") or _repo()
+        repo = kwargs.get("repo") or get_repo()
         number = kwargs.get("number")
 
         if action == "list_open":
@@ -155,14 +120,14 @@ class GitHubIssuesTool(Tool):
 
     async def _list_open(self, repo: str) -> str:
         """List open issues."""
-        rc, out, err = await _run_gh([
+        rc, out, err = await run_gh([
             "issue", "list",
             "--repo", repo,
             "--state", "open",
             "--json", "number,title,body,labels,createdAt,updatedAt",
             "--limit", "50",
         ])
-        error = _check_gh_error(rc, err)
+        error = check_gh_error(rc, err)
         if error:
             return error
 
@@ -184,39 +149,39 @@ class GitHubIssuesTool(Tool):
 
     async def _close(self, repo: str, number: int, reason: str) -> str:
         """Close an issue with a comment."""
-        rc, out, err = await _run_gh([
+        rc, out, err = await run_gh([
             "issue", "close",
             str(number),
             "--repo", repo,
             "--comment", reason,
         ])
-        error = _check_gh_error(rc, err)
+        error = check_gh_error(rc, err)
         if error:
             return error
         return f"Closed issue #{number} in {repo}."
 
     async def _comment(self, repo: str, number: int, comment_text: str) -> str:
         """Add a comment to an issue."""
-        rc, out, err = await _run_gh([
+        rc, out, err = await run_gh([
             "issue", "comment",
             str(number),
             "--repo", repo,
             "--body", comment_text,
         ])
-        error = _check_gh_error(rc, err)
+        error = check_gh_error(rc, err)
         if error:
             return error
         return f"Commented on issue #{number} in {repo}."
 
     async def _label(self, repo: str, number: int, label_name: str) -> str:
         """Add a label to an issue."""
-        rc, out, err = await _run_gh([
+        rc, out, err = await run_gh([
             "issue", "edit",
             str(number),
             "--repo", repo,
             "--add-label", label_name,
         ])
-        error = _check_gh_error(rc, err)
+        error = check_gh_error(rc, err)
         if error:
             return error
         return f"Added label '{label_name}' to issue #{number} in {repo}."
