@@ -38,36 +38,68 @@ protoLabs Studio API (HTTP) + GitHub CLI + Discord Webhooks
 ### Prerequisites
 
 - Docker and Docker Compose
+- [Infisical CLI](https://infisical.com/docs/cli/overview) installed and logged in to `secrets.proto-labs.ai`
 - Claude Code authenticated (`claude` CLI logged in)
 - protoLabs Studio server running (default: localhost:3008)
 
-### Run
+### 1. Clone and configure
 
 ```bash
-# Clone
 git clone https://github.com/protoLabsAI/quinn.git
 cd quinn
 
-# Configure (edit config/qa-config.json with your apps)
-cp .env.example .env
+# Log in to Infisical (one-time)
+infisical login --domain https://secrets.proto-labs.ai
 
-# Start
-docker compose up --build
+# Edit config/qa-config.json with your apps
 ```
 
-Quinn's UI will be available at http://localhost:7871.
+### 2. Run (one-liner)
 
-### Environment Variables
+```bash
+INFISICAL_API_URL=https://secrets.proto-labs.ai infisical run --env prod -- docker compose up --build
+```
 
-| Variable               | Description                            | Default                 |
-| ---------------------- | -------------------------------------- | ----------------------- |
-| `PROTOLABS_SERVER_URL` | protoLabs Studio API URL               | `http://localhost:3008` |
-| `PROTOLABS_API_KEY`    | API key for protoLabs Studio           |                         |
-| `GITHUB_TOKEN`         | GitHub token for issue/PR operations   |                         |
-| `DISCORD_BOT_TOKEN`    | Discord bot token for reading channels |                         |
-| `DISCORD_WEBHOOK_URL`  | Discord webhook for publishing updates |                         |
-| `LANGFUSE_PUBLIC_KEY`  | Langfuse tracing (optional)            |                         |
-| `LANGFUSE_SECRET_KEY`  | Langfuse tracing (optional)            |                         |
+This pulls 24 secrets from Infisical, injects them as env vars, and starts Quinn. No `.env` files needed.
+
+Quinn's UI will be available at **http://localhost:7871**.
+
+### 3. Auto-start on boot (systemd)
+
+```bash
+# Install the service
+sudo cp quinn.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable quinn
+sudo systemctl start quinn
+
+# Check status
+sudo systemctl status quinn
+journalctl -u quinn -f
+```
+
+### Secrets Management
+
+All secrets are managed via [Infisical](https://secrets.proto-labs.ai). The `.infisical.json` in this repo points to the `secret-management` project.
+
+Key secrets used by Quinn:
+
+| Secret (Infisical)    | Maps to               | Purpose                          |
+| --------------------- | --------------------- | -------------------------------- |
+| `DISCORD_BOT_QUINN`   | `DISCORD_BOT_TOKEN`   | Discord bot for reading channels |
+| `ANTHROPIC_API_KEY`   | `ANTHROPIC_API_KEY`   | Claude API access                |
+| `GITHUB_TOKEN`        | `GITHUB_TOKEN`        | GitHub issue/PR operations       |
+| `DISCORD_WEBHOOK_URL` | `DISCORD_WEBHOOK_URL` | Discord webhook for publishing   |
+
+The `DISCORD_BOT_QUINN` to `DISCORD_BOT_TOKEN` mapping happens automatically in the entrypoint.
+
+### Manual fallback (no Infisical)
+
+If Infisical is not available, pass env vars directly:
+
+```bash
+DISCORD_BOT_TOKEN=xxx ANTHROPIC_API_KEY=xxx GITHUB_TOKEN=xxx docker compose up --build
+```
 
 ## Chat Commands
 

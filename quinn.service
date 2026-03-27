@@ -1,0 +1,21 @@
+[Unit]
+Description=Quinn — Autonomous QA Engineer for protoLabs
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=josh
+Group=docker
+WorkingDirectory=/home/josh/dev/quinn
+Environment=INFISICAL_API_URL=https://secrets.proto-labs.ai
+ExecStartPre=/usr/bin/docker compose down --remove-orphans
+ExecStart=/home/josh/.nvm/versions/node/v22.22.0/bin/infisical run --domain https://secrets.proto-labs.ai --env prod -- /usr/bin/docker compose up --build
+ExecStop=/usr/bin/docker compose down
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
