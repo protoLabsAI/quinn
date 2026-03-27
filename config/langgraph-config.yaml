@@ -1,0 +1,34 @@
+# Quinn QA Engineer — LangGraph agent configuration
+
+model:
+  provider: cliproxy
+  name: claude-sonnet-4-6
+  api_base: http://127.0.0.1:8317/v1
+  api_key: quinn-internal
+  temperature: 0.2
+  max_tokens: 4096
+  max_iterations: 75
+
+subagents:
+  auditor:
+    enabled: true
+    tools: [board_monitor, pr_inspector, github_issues]
+    max_turns: 40
+  verifier:
+    enabled: true
+    tools: [qa_memory, browser]
+    max_turns: 30
+  reporter:
+    enabled: true
+    tools: [qa_memory, discord_feed, release_notes]
+    max_turns: 20
+
+middleware:
+  knowledge: true
+  audit: true
+  memory: true
+
+knowledge:
+  db_path: /sandbox/knowledge/qa.db
+  embed_model: nomic-embed-text
+  top_k: 5

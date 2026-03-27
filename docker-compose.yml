@@ -1,0 +1,155 @@
+services:
+  researcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: protoresearcher
+    hostname: sandbox
+
+    # NemoClaw-inspired security
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=seccomp-profile.json
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    read_only: true
+
+    # Writable mounts (tmpfs = ephemeral)
+    tmpfs:
+      - /tmp:size=512M,uid=1001,gid=1001
+      - /run:size=64M
+      - /sandbox:size=512M,uid=1001,gid=1001
+      - /home/sandbox:size=128M,uid=1001,gid=1001
+
+    # Persistent volumes
+    volumes:
+      - protoresearcher-knowledge:/sandbox/knowledge
+      - protoresearcher-audit:/sandbox/audit
+      - protoresearcher-papers:/sandbox/papers
+      - protoresearcher-cron:/opt/.cron
+      - protoresearcher-cliproxy:/opt/.cliproxy
+      # Claude OAuth credentials (read-only)
+      - ${HOME}/.claude:/opt/claude-creds:ro
+
+    ports:
+      - "7872:7870"
+
+    # Network: host vLLM + Ollama access
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+        reservations:
+          memory: 512M
+
+    environment:
+      - HOME=/home/sandbox
+      - AGENT_BACKEND=${AGENT_BACKEND:-nanobot}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Langfuse tracing (optional)
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://host.docker.internal:3001}
+      # GitHub (optional, for higher API rate limits)
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Discord (optional, for reading channel feeds)
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      # Rabbit Hole MCP server auth token
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
+
+    stdin_open: true
+    tty: true
+
+    command: ["/opt/protoresearcher/entrypoint.sh"]
+
+  # Lab mode — GPU-enabled researcher with training capabilities
+  # Usage: docker compose --profile lab up --build
+  researcher-lab:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: lab
+    container_name: protoresearcher-lab
+    hostname: sandbox
+    profiles:
+      - lab
+
+    # Relaxed security for CUDA (GPU needs syscalls seccomp blocks)
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+
+    tmpfs:
+      - /tmp:size=1G,uid=1001,gid=1001
+      - /run:size=64M
+      - /sandbox:size=1G,uid=1001,gid=1001
+      - /home/sandbox:size=256M,uid=1001,gid=1001
+
+    volumes:
+      - protoresearcher-knowledge:/sandbox/knowledge
+      - protoresearcher-audit:/sandbox/audit
+      - protoresearcher-papers:/sandbox/papers
+      - protoresearcher-lab:/sandbox/lab
+      - protoresearcher-cron:/opt/.cron
+      # Host mounts for training
+      - /mnt/models/huggingface:/mnt/models/huggingface:ro
+      - /home/ava/dev/LLaMA-Factory:/opt/llama-factory:ro
+      - /home/ava/dev/lab/training/data:/opt/lab-data:ro
+      - /mnt/data/training/researcher:/mnt/data/training/researcher
+      # Claude OAuth credentials (read-only)
+      - ${HOME}/.claude:/opt/claude-creds:ro
+
+    ports:
+      - "7870:7870"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # GPU access
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 16G
+        reservations:
+          memory: 2G
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    environment:
+      - HOME=/home/sandbox
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - LAB_GPU=${LAB_GPU:-1}
+      - HF_HOME=/mnt/models/huggingface
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://host.docker.internal:3001}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+
+    stdin_open: true
+    tty: true
+
+    command: ["/opt/protoresearcher/entrypoint.sh"]
+
+volumes:
+  protoresearcher-knowledge:
+  protoresearcher-audit:
+  protoresearcher-papers:
+  protoresearcher-cron:
+  protoresearcher-cliproxy:
+  protoresearcher-lab:

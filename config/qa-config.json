@@ -1,0 +1,23 @@
+{
+  "apps": [
+    {
+      "name": "protoMaker",
+      "projectPath": "/home/josh/dev/ava",
+      "serverUrl": "http://localhost:3008",
+      "githubRepo": "protoLabsAI/protoMaker"
+    }
+  ],
+  "thresholds": {
+    "stalePrHours": 48,
+    "staleIssuesDays": 30,
+    "maxBlockedFeatures": 3,
+    "reviewQueueMax": 5
+  },
+  "discord": {
+    "channels": {
+      "releases": "1469049508909289752",
+      "dev": "1469080556720623699",
+      "bug-reports": "1477837770704814162"
+    }
+  }
+}

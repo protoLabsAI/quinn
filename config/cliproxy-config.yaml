@@ -1,0 +1,12 @@
+# CLIProxyAPI config — OpenAI-compatible proxy for Claude Code OAuth
+host: "0.0.0.0"
+port: 8317
+auth-dir: "/opt/.cliproxy"
+api-keys:
+  - "quinn-internal"
+remote-management:
+  allow-remote: false
+  secret-key: ""
+  disable-control-panel: true
+debug: false
+logging-to-file: false

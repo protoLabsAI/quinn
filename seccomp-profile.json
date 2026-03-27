@@ -1,0 +1,89 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "defaultErrnoRet": 1,
+  "archMap": [
+    {
+      "architecture": "SCMP_ARCH_X86_64",
+      "subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"]
+    }
+  ],
+  "syscalls": [
+    {
+      "comment": "Standard process operations",
+      "names": [
+        "read", "write", "open", "close", "stat", "fstat", "lstat",
+        "poll", "lseek", "mmap", "mprotect", "munmap", "brk",
+        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn",
+        "ioctl", "pread64", "pwrite64", "readv", "writev",
+        "access", "pipe", "select", "sched_yield",
+        "mremap", "msync", "mincore", "madvise",
+        "dup", "dup2", "dup3", "pause", "nanosleep",
+        "getitimer", "alarm", "setitimer",
+        "getpid", "getppid", "getpgrp", "getpgid", "setpgid", "getuid", "geteuid", "getgid", "getegid", "getsid", "setsid",
+        "getgroups", "getresuid", "getresgid",
+        "sendfile", "socket", "connect", "accept", "accept4",
+        "sendto", "recvfrom", "sendmsg", "recvmsg",
+        "bind", "listen", "getsockname", "getpeername",
+        "socketpair", "setsockopt", "getsockopt",
+        "clone", "fork", "vfork", "execve",
+        "exit", "exit_group", "wait4", "waitid",
+        "kill", "tgkill", "tkill",
+        "uname", "fcntl", "flock", "fsync", "fdatasync",
+        "truncate", "ftruncate",
+        "getdents", "getdents64",
+        "getcwd", "chdir", "fchdir",
+        "rename", "mkdir", "rmdir", "creat", "link", "unlink",
+        "symlink", "readlink", "chmod", "fchmod", "chown", "fchown", "lchown",
+        "umask", "gettimeofday", "getrlimit", "getrusage",
+        "sysinfo", "times",
+        "futex", "sched_getaffinity", "sched_setaffinity",
+        "set_tid_address", "set_robust_list", "get_robust_list",
+        "epoll_create", "epoll_create1", "epoll_ctl", "epoll_wait", "epoll_pwait",
+        "eventfd", "eventfd2", "signalfd", "signalfd4",
+        "timerfd_create", "timerfd_settime", "timerfd_gettime",
+        "pipe2", "inotify_init", "inotify_init1", "inotify_add_watch", "inotify_rm_watch",
+        "openat", "mkdirat", "mknodat", "fchownat", "newfstatat",
+        "unlinkat", "renameat", "renameat2", "linkat", "symlinkat", "readlinkat",
+        "fchmodat", "faccessat", "faccessat2",
+        "pselect6", "ppoll",
+        "arch_prctl", "prctl",
+        "clock_gettime", "clock_getres", "clock_nanosleep",
+        "sched_getparam", "sched_setparam",
+        "sched_getscheduler", "sched_setscheduler",
+        "prlimit64", "getrandom",
+        "memfd_create", "copy_file_range",
+        "statx", "close_range", "openat2",
+        "rseq", "clone3",
+        "newfstatat", "statfs", "fstatfs",
+
+        "membarrier", "sigaltstack", "gettid", "restart_syscall",
+        "pkey_alloc", "pkey_free", "pkey_mprotect",
+        "mlock", "mlock2", "munlock",
+        "capget",
+        "rt_sigpending", "rt_sigsuspend", "rt_sigtimedwait",
+        "getcpu", "sched_get_priority_max", "sched_get_priority_min",
+        "getpriority", "setpriority",
+        "preadv", "pwritev", "fallocate", "fadvise64",
+        "splice", "tee", "sendmmsg", "recvmmsg", "shutdown",
+        "epoll_pwait2", "sync", "syncfs",
+        "setrlimit", "utimensat"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Block dangerous syscalls explicitly",
+      "names": [
+        "mount", "umount2", "pivot_root", "chroot",
+        "swapon", "swapoff",
+        "reboot", "sethostname", "setdomainname",
+        "init_module", "finit_module", "delete_module",
+        "kexec_load", "kexec_file_load",
+        "ptrace",
+        "personality",
+        "keyctl", "request_key", "add_key"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    }
+  ]
+}
