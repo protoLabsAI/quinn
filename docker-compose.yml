@@ -59,9 +59,10 @@ services:
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_QUINN:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - DISCORD_GUILD_ID=${DISCORD_GUILD_ID:-1070606339363049492}
-      # protoLabs Studio API
-      - PROTOLABS_SERVER_URL=${PROTOLABS_SERVER_URL:-http://host.docker.internal:3008}
-      - PROTOLABS_API_KEY=${PROTOLABS_API_KEY:-}
+      # protoLabs Studio API (automaker-server on shared Docker network)
+      - PROTOLABS_SERVER_URL=${PROTOLABS_SERVER_URL:-http://automaker-server:3008}
+      - PROTOLABS_API_KEY=${PROTOLABS_API_KEY:-automaker-staging-key-2026}
+      - PROTOLABS_PROJECT_PATH=${PROTOLABS_PROJECT_PATH:-/home/josh/dev/ava}
       # Langfuse tracing (optional)
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
@@ -71,6 +72,15 @@ services:
     tty: true
 
     command: ["/opt/quinn/entrypoint.sh"]
+
+    networks:
+      - default
+      - automaker
+
+networks:
+  automaker:
+    external: true
+    name: automaker-staging_default
 
 volumes:
   quinn-knowledge:
