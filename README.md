@@ -101,6 +101,76 @@ If Infisical is not available, pass env vars directly:
 DISCORD_BOT_TOKEN=xxx ANTHROPIC_API_KEY=xxx GITHUB_TOKEN=xxx docker compose up --build
 ```
 
+## API — Trigger Quinn from Other Agents
+
+Quinn exposes an HTTP API at `http://localhost:7873/api/chat`. Any agent, script, or cron can trigger Quinn's QA capabilities.
+
+### Endpoint
+
+```
+POST http://localhost:7873/api/chat
+Content-Type: application/json
+
+{"message": "<command or natural language>"}
+```
+
+### Response
+
+```json
+{
+  "response": "Markdown-formatted response text",
+  "messages": [{ "role": "assistant", "content": "..." }]
+}
+```
+
+### Examples
+
+```bash
+# Quick status check
+curl -s http://localhost:7873/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "/status"}'
+
+# Full board audit
+curl -s http://localhost:7873/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "/audit"}'
+
+# Triage GitHub issues
+curl -s http://localhost:7873/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "/triage"}'
+
+# Generate release notes
+curl -s http://localhost:7873/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "/release v0.90.1"}'
+
+# Natural language works too
+curl -s http://localhost:7873/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Check if there are any failing PRs on protoMaker"}'
+```
+
+### Calling from Ava or Other Agents
+
+From any protoLabs agent with shell access:
+
+```bash
+# In a Claude Code agent prompt or script
+QUINN_RESPONSE=$(curl -s http://localhost:7873/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "/audit"}' | jq -r '.response')
+```
+
+### Discord Slash Commands
+
+Quinn also responds to Discord slash commands in the protoLabs server:
+
+- `/quinn status` — Quick health check
+- `/quinn bugs` — Active bugs across apps
+- `/quinn release [version]` — Generate release notes
+
 ## Chat Commands
 
 | Command              | Description                                |
