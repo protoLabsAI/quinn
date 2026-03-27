@@ -1,4 +1,4 @@
-"""LangGraph configuration loader for protoResearcher."""
+"""LangGraph configuration loader for Quinn QA agent."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,22 +20,22 @@ class LangGraphConfig:
     model_provider: str = "cliproxy"  # cliproxy or vllm
     model_name: str = "claude-sonnet-4-6"
     api_base: str = "http://127.0.0.1:8317/v1"
-    api_key: str = "protoresearcher-internal"
+    api_key: str = "quinn-internal"
     temperature: float = 0.3
     max_tokens: int = 4096
     max_iterations: int = 75
 
     # Subagents
-    explorer: SubagentDef = field(default_factory=lambda: SubagentDef(
-        tools=["discord_feed", "huggingface", "github_trending", "browser"],
+    auditor: SubagentDef = field(default_factory=lambda: SubagentDef(
+        tools=["discord_feed", "github_trending", "browser", "web_search"],
         max_turns=30,
     ))
-    analyst: SubagentDef = field(default_factory=lambda: SubagentDef(
-        tools=["paper_reader", "research_memory", "browser"],
+    verifier: SubagentDef = field(default_factory=lambda: SubagentDef(
+        tools=["browser", "web_fetch", "qa_memory"],
         max_turns=40,
     ))
-    writer: SubagentDef = field(default_factory=lambda: SubagentDef(
-        tools=["research_memory", "discord_feed"],
+    reporter: SubagentDef = field(default_factory=lambda: SubagentDef(
+        tools=["qa_memory", "discord_feed"],
         max_turns=20,
     ))
 
@@ -45,7 +45,7 @@ class LangGraphConfig:
     memory_middleware: bool = True
 
     # Knowledge store
-    knowledge_db_path: str = "/sandbox/knowledge/research.db"
+    knowledge_db_path: str = "/sandbox/knowledge/qa.db"
     embed_model: str = "nomic-embed-text"
     knowledge_top_k: int = 5
 
@@ -80,7 +80,7 @@ class LangGraphConfig:
             knowledge_top_k=knowledge.get("top_k", cls.knowledge_top_k),
         )
 
-        for name in ("explorer", "analyst", "writer"):
+        for name in ("auditor", "verifier", "reporter"):
             if name in subagents:
                 sub = subagents[name]
                 setattr(config, name, SubagentDef(

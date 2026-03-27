@@ -1,6 +1,6 @@
-"""Main LangGraph agent for protoResearcher.
+"""Main LangGraph agent for Quinn QA.
 
-Builds the research agent graph with middleware, tools, and subagent support.
+Builds the QA agent graph with middleware, tools, and subagent support.
 Uses langchain's create_agent() with AgentMiddleware for the DeerFlow pattern.
 """
 
@@ -44,7 +44,7 @@ def _build_middleware(config: LangGraphConfig, knowledge_store=None):
 def _build_task_tool(config: LangGraphConfig, all_tools: list[BaseTool]):
     """Build the task tool for subagent delegation.
 
-    This is a simplified version of DeerFlow's task tool — it runs
+    This is a simplified version of DeerFlow's task tool -- it runs
     subagents synchronously (blocking) since our Gradio UI doesn't
     support async streaming of subagent progress yet.
     """
@@ -60,19 +60,19 @@ def _build_task_tool(config: LangGraphConfig, all_tools: list[BaseTool]):
     async def task(
         description: str,
         prompt: str,
-        subagent_type: str = "explorer",
+        subagent_type: str = "auditor",
     ) -> str:
         """Delegate a task to a specialized subagent.
 
         Available subagents:
-        - explorer: Scans Discord, HF, GitHub for research links and trends
-        - analyst: Reads papers deeply, extracts findings, stores to knowledge base
-        - writer: Synthesizes findings into digests, publishes to Discord
+        - auditor: Scans boards, CI, GitHub for issues and health status
+        - verifier: Runs endpoint checks, regression tests, deployment validation
+        - reporter: Synthesizes findings into QA reports, publishes to Discord
 
         Args:
             description: Short description of what this task will accomplish
             prompt: Detailed instructions for the subagent
-            subagent_type: Which subagent to use (explorer, analyst, writer)
+            subagent_type: Which subagent to use (auditor, verifier, reporter)
         """
         sub_config = SUBAGENT_REGISTRY.get(subagent_type)
         if not sub_config:
@@ -110,7 +110,7 @@ def _build_task_tool(config: LangGraphConfig, all_tools: list[BaseTool]):
                     if content and not content.startswith("Error"):
                         return f"[{subagent_type} completed: {description}]\n\n{content}"
 
-            return f"[{subagent_type} completed: {description}] — no output produced."
+            return f"[{subagent_type} completed: {description}] -- no output produced."
         except Exception as e:
             return f"Error: Subagent '{subagent_type}' failed: {e}"
 
@@ -122,7 +122,7 @@ def create_researcher_graph(
     knowledge_store=None,
     include_subagents: bool = True,
 ):
-    """Create the main protoResearcher LangGraph agent.
+    """Create the main Quinn QA LangGraph agent.
 
     Returns a compiled graph that can be invoked with:
         graph.ainvoke({"messages": [HumanMessage(content="...")]})
@@ -146,8 +146,8 @@ def create_researcher_graph(
     )
 
     # Create agent with middleware (DeerFlow pattern)
-    # Note: state_schema omitted — create_agent manages its own AgentState.
-    # Custom state (research_context, findings) flows via system prompt + tool results.
+    # Note: state_schema omitted -- create_agent manages its own AgentState.
+    # Custom state (qa_context, findings) flows via system prompt + tool results.
     agent = create_agent(
         model=llm,
         tools=all_tools,
@@ -161,7 +161,7 @@ def create_researcher_graph(
 def create_simple_agent(config: LangGraphConfig, knowledge_store=None):
     """Create a simple agent without subagents (for debugging/testing).
 
-    Uses create_react_agent from langgraph.prebuilt — simpler but no middleware.
+    Uses create_react_agent from langgraph.prebuilt -- simpler but no middleware.
     """
     from langgraph.prebuilt import create_react_agent
 

@@ -1,7 +1,7 @@
-"""Knowledge store for protoResearcher — SQLite + sqlite-vec backed.
+"""Knowledge store for Quinn QA agent -- SQLite + sqlite-vec backed.
 
-Stores papers, findings, digests, model releases with semantic search
-via Ollama embeddings and sqlite-vec.
+Stores QA reports, bug patterns, release notes, triage log entries, and
+tracked apps with semantic search via Ollama embeddings and sqlite-vec.
 """
 
 import json
@@ -17,12 +17,12 @@ import httpx
 _OLLAMA_URL = "http://host.docker.internal:11434"
 _EMBED_MODEL = "nomic-embed-text"
 _EMBED_DIM = 768
-_DB_PATH = Path("/sandbox/knowledge/research.db")
+_DB_PATH = Path("/sandbox/knowledge/qa.db")
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 class KnowledgeStore:
-    """Research knowledge store with semantic vector search."""
+    """QA knowledge store with semantic vector search."""
 
     def __init__(
         self,
@@ -102,186 +102,304 @@ class KnowledgeStore:
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()
 
-    # --- Papers ---
+    # --- QA Reports ---
 
-    def add_paper(
+    def add_report(
         self,
-        arxiv_id: str,
-        title: str,
-        authors: list[str] | None = None,
-        abstract: str = "",
-        summary: str = "",
-        significance: str = "unknown",
-        categories: list[str] | None = None,
-        tags: list[str] | None = None,
-        pdf_path: str = "",
-        source_url: str = "",
-        published_at: str = "",
-        notes: str = "",
+        app_name: str,
+        content: str,
+        verdict: str = "PASS",
+        version: str = "",
+        scope: str = "release",
+        checks_total: int = 0,
+        checks_passed: int = 0,
+        checks_failed: int = 0,
+        gaps: int = 0,
+        findings: list[dict] | None = None,
     ) -> bool:
+        """Store a QA verification report."""
         db = self._get_db()
         if db is None:
             return False
 
         now = self._now_iso()
-        read_at = now if summary else ""
-
-        db.execute(
-            """INSERT OR REPLACE INTO papers
-               (id, title, authors, abstract, summary, significance, categories, tags,
-                pdf_path, source_url, published_at, discovered_at, read_at, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        cursor = db.execute(
+            """INSERT INTO qa_reports
+               (app_name, version, scope, verdict, checks_total, checks_passed,
+                checks_failed, gaps, content, findings, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                arxiv_id, title, json.dumps(authors or []), abstract, summary,
-                significance, json.dumps(categories or []), json.dumps(tags or []),
-                pdf_path, source_url, published_at, now, read_at, notes,
+                app_name, version, scope, verdict, checks_total, checks_passed,
+                checks_failed, gaps, content, json.dumps(findings or []), now,
             ),
         )
-        # Embed abstract + summary for search
-        embed_text = f"{title}\n{abstract}\n{summary}".strip()
-        self._store_vector(db, embed_text, "papers", arxiv_id)
+        embed_text = f"{app_name} {version} {scope} {verdict}\n{content[:500]}"
+        self._store_vector(db, embed_text, "qa_reports", str(cursor.lastrowid))
         db.commit()
         return True
 
-    def get_paper(self, arxiv_id: str) -> dict | None:
-        db = self._get_db()
-        if db is None:
-            return None
-        row = db.execute("SELECT * FROM papers WHERE id = ?", (arxiv_id,)).fetchone()
-        if not row:
-            return None
-        cols = [d[0] for d in db.execute("SELECT * FROM papers LIMIT 0").description]
-        return dict(zip(cols, row))
-
-    def get_papers(
-        self, topic: str | None = None, since: str | None = None,
-        significance: str | None = None, limit: int = 20
+    def get_reports(
+        self, app_name: str | None = None, verdict: str | None = None,
+        limit: int = 20,
     ) -> list[dict]:
+        """Get QA reports, optionally filtered by app or verdict."""
         db = self._get_db()
         if db is None:
             return []
-        query = "SELECT * FROM papers WHERE 1=1"
+        query = "SELECT * FROM qa_reports WHERE 1=1"
         params: list[Any] = []
-        if significance:
-            query += " AND significance = ?"
-            params.append(significance)
-        if since:
-            query += " AND discovered_at >= ?"
-            params.append(since)
-        if topic:
-            query += " AND (tags LIKE ? OR categories LIKE ?)"
-            params.extend([f'%"{topic}"%', f'%"{topic}"%'])
-        query += " ORDER BY discovered_at DESC LIMIT ?"
-        params.append(limit)
-        rows = db.execute(query, params).fetchall()
-        cols = [d[0] for d in db.execute("SELECT * FROM papers LIMIT 0").description]
-        return [dict(zip(cols, row)) for row in rows]
-
-    # --- Findings ---
-
-    def add_finding(
-        self, content: str, source: str = "", source_type: str = "",
-        topic: str = "", finding_type: str = "insight", significance: str = "",
-    ) -> bool:
-        db = self._get_db()
-        if db is None:
-            return False
-        now = self._now_iso()
-        cursor = db.execute(
-            """INSERT INTO findings (content, source, source_type, topic, finding_type, significance, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (content, source, source_type, topic, finding_type, significance, now),
-        )
-        self._store_vector(db, content, "findings", str(cursor.lastrowid))
-        db.commit()
-        return True
-
-    # --- Topics ---
-
-    def add_topic(
-        self, name: str, description: str = "", keywords: list[str] | None = None,
-        priority: int = 2,
-    ) -> bool:
-        db = self._get_db()
-        if db is None:
-            return False
-        now = self._now_iso()
-        db.execute(
-            """INSERT OR REPLACE INTO topics (name, description, keywords, priority, active, created_at)
-               VALUES (?, ?, ?, ?, 1, ?)""",
-            (name, description, json.dumps(keywords or []), priority, now),
-        )
-        db.commit()
-        return True
-
-    def get_topics(self, active_only: bool = True) -> list[dict]:
-        db = self._get_db()
-        if db is None:
-            return []
-        query = "SELECT * FROM topics"
-        if active_only:
-            query += " WHERE active = 1"
-        query += " ORDER BY priority, name"
-        rows = db.execute(query).fetchall()
-        cols = [d[0] for d in db.execute("SELECT * FROM topics LIMIT 0").description]
-        return [dict(zip(cols, row)) for row in rows]
-
-    # --- Digests ---
-
-    def add_digest(
-        self, title: str, content: str, digest_type: str = "weekly",
-        topic: str = "", papers_referenced: list[str] | None = None,
-    ) -> bool:
-        db = self._get_db()
-        if db is None:
-            return False
-        now = self._now_iso()
-        cursor = db.execute(
-            """INSERT INTO digests (title, content, digest_type, topic, papers_referenced, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (title, content, digest_type, topic, json.dumps(papers_referenced or []), now),
-        )
-        self._store_vector(db, f"{title}\n{content[:500]}", "digests", str(cursor.lastrowid))
-        db.commit()
-        return True
-
-    def get_digests(self, topic: str | None = None, limit: int = 10) -> list[dict]:
-        db = self._get_db()
-        if db is None:
-            return []
-        query = "SELECT * FROM digests"
-        params: list[Any] = []
-        if topic:
-            query += " WHERE topic = ?"
-            params.append(topic)
+        if app_name:
+            query += " AND app_name = ?"
+            params.append(app_name)
+        if verdict:
+            query += " AND verdict = ?"
+            params.append(verdict)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         rows = db.execute(query, params).fetchall()
-        cols = [d[0] for d in db.execute("SELECT * FROM digests LIMIT 0").description]
+        cols = [d[0] for d in db.execute("SELECT * FROM qa_reports LIMIT 0").description]
         return [dict(zip(cols, row)) for row in rows]
 
-    # --- Model Releases ---
+    # --- Bug Patterns ---
 
-    def add_model_release(
-        self, model_id: str, name: str = "", organization: str = "",
-        description: str = "", parameters: str = "", architecture: str = "",
-        license_: str = "", downloads: int = 0, likes: int = 0,
-        source: str = "huggingface", released_at: str = "", notes: str = "",
+    def add_bug_pattern(
+        self,
+        title: str,
+        description: str,
+        app_name: str = "",
+        severity: str = "MEDIUM",
+        category: str = "",
+        pattern: str = "",
+        resolution: str = "",
     ) -> bool:
+        """Store a recurring bug pattern for regression detection."""
+        db = self._get_db()
+        if db is None:
+            return False
+
+        now = self._now_iso()
+
+        # Check if pattern already exists (by title + app)
+        existing = db.execute(
+            "SELECT id, occurrences FROM bug_patterns WHERE title = ? AND app_name = ?",
+            (title, app_name),
+        ).fetchone()
+
+        if existing:
+            db.execute(
+                "UPDATE bug_patterns SET occurrences = ?, last_seen = ?, resolved = 0 WHERE id = ?",
+                (existing[1] + 1, now, existing[0]),
+            )
+        else:
+            cursor = db.execute(
+                """INSERT INTO bug_patterns
+                   (title, description, app_name, severity, category, pattern,
+                    occurrences, first_seen, last_seen, resolved, resolution)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 0, ?)""",
+                (title, description, app_name, severity, category, pattern, now, now, resolution),
+            )
+            embed_text = f"{title}\n{description}\n{pattern}"
+            self._store_vector(db, embed_text, "bug_patterns", str(cursor.lastrowid))
+
+        db.commit()
+        return True
+
+    def get_bug_patterns(
+        self, app_name: str | None = None, severity: str | None = None,
+        unresolved_only: bool = True, limit: int = 50,
+    ) -> list[dict]:
+        """Get bug patterns, optionally filtered."""
+        db = self._get_db()
+        if db is None:
+            return []
+        query = "SELECT * FROM bug_patterns WHERE 1=1"
+        params: list[Any] = []
+        if app_name:
+            query += " AND app_name = ?"
+            params.append(app_name)
+        if severity:
+            query += " AND severity = ?"
+            params.append(severity)
+        if unresolved_only:
+            query += " AND resolved = 0"
+        query += " ORDER BY last_seen DESC LIMIT ?"
+        params.append(limit)
+        rows = db.execute(query, params).fetchall()
+        cols = [d[0] for d in db.execute("SELECT * FROM bug_patterns LIMIT 0").description]
+        return [dict(zip(cols, row)) for row in rows]
+
+    def resolve_bug_pattern(self, pattern_id: int, resolution: str = "") -> bool:
+        """Mark a bug pattern as resolved."""
+        db = self._get_db()
+        if db is None:
+            return False
+        db.execute(
+            "UPDATE bug_patterns SET resolved = 1, resolution = ? WHERE id = ?",
+            (resolution, pattern_id),
+        )
+        db.commit()
+        return True
+
+    # --- Release Notes ---
+
+    def add_release_notes(
+        self,
+        app_name: str,
+        version: str,
+        content: str,
+        title: str = "",
+        features_count: int = 0,
+        fixes_count: int = 0,
+        breaking_changes: list[str] | None = None,
+    ) -> bool:
+        """Store generated release notes."""
+        db = self._get_db()
+        if db is None:
+            return False
+
+        now = self._now_iso()
+        cursor = db.execute(
+            """INSERT INTO release_notes
+               (app_name, version, title, content, features_count, fixes_count,
+                breaking_changes, published, published_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)""",
+            (
+                app_name, version, title, content, features_count, fixes_count,
+                json.dumps(breaking_changes or []), now,
+            ),
+        )
+        embed_text = f"{app_name} {version} {title}\n{content[:500]}"
+        self._store_vector(db, embed_text, "release_notes", str(cursor.lastrowid))
+        db.commit()
+        return True
+
+    def get_release_notes(
+        self, app_name: str | None = None, limit: int = 10,
+    ) -> list[dict]:
+        """Get release notes, optionally filtered by app."""
+        db = self._get_db()
+        if db is None:
+            return []
+        query = "SELECT * FROM release_notes"
+        params: list[Any] = []
+        if app_name:
+            query += " WHERE app_name = ?"
+            params.append(app_name)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = db.execute(query, params).fetchall()
+        cols = [d[0] for d in db.execute("SELECT * FROM release_notes LIMIT 0").description]
+        return [dict(zip(cols, row)) for row in rows]
+
+    # --- Triage Log ---
+
+    def add_triage_entry(
+        self,
+        source: str,
+        source_id: str,
+        classification: str,
+        app_name: str = "",
+        severity: str = "",
+        reason: str = "",
+        action_taken: str = "",
+    ) -> bool:
+        """Log an issue triage decision."""
+        db = self._get_db()
+        if db is None:
+            return False
+
+        now = self._now_iso()
+        cursor = db.execute(
+            """INSERT INTO triage_log
+               (source, source_id, app_name, classification, severity, reason,
+                action_taken, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (source, source_id, app_name, classification, severity, reason, action_taken, now),
+        )
+        embed_text = f"{source} {source_id} {classification} {reason}"
+        self._store_vector(db, embed_text, "triage_log", str(cursor.lastrowid))
+        db.commit()
+        return True
+
+    def get_triage_log(
+        self, app_name: str | None = None, classification: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Get triage log entries."""
+        db = self._get_db()
+        if db is None:
+            return []
+        query = "SELECT * FROM triage_log WHERE 1=1"
+        params: list[Any] = []
+        if app_name:
+            query += " AND app_name = ?"
+            params.append(app_name)
+        if classification:
+            query += " AND classification = ?"
+            params.append(classification)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = db.execute(query, params).fetchall()
+        cols = [d[0] for d in db.execute("SELECT * FROM triage_log LIMIT 0").description]
+        return [dict(zip(cols, row)) for row in rows]
+
+    # --- Apps ---
+
+    def add_app(
+        self,
+        name: str,
+        github_repo: str = "",
+        server_url: str = "",
+        config: dict | None = None,
+    ) -> bool:
+        """Register an app for QA tracking."""
+        db = self._get_db()
+        if db is None:
+            return False
+
+        db.execute(
+            """INSERT OR REPLACE INTO apps (name, github_repo, server_url, config)
+               VALUES (?, ?, ?, ?)""",
+            (name, github_repo, server_url, json.dumps(config or {})),
+        )
+        db.commit()
+        return True
+
+    def get_apps(self) -> list[dict]:
+        """Get all tracked apps."""
+        db = self._get_db()
+        if db is None:
+            return []
+        rows = db.execute("SELECT * FROM apps ORDER BY name").fetchall()
+        cols = [d[0] for d in db.execute("SELECT * FROM apps LIMIT 0").description]
+        return [dict(zip(cols, row)) for row in rows]
+
+    def update_app_check(self, name: str) -> bool:
+        """Update last_checked_at for an app."""
         db = self._get_db()
         if db is None:
             return False
         now = self._now_iso()
-        cursor = db.execute(
-            """INSERT INTO model_releases
-               (model_id, name, organization, description, parameters, architecture,
-                license, downloads, likes, source, released_at, discovered_at, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (model_id, name, organization, description, parameters, architecture,
-             license_, downloads, likes, source, released_at, now, notes),
+        db.execute(
+            "UPDATE apps SET last_checked_at = ? WHERE name = ?",
+            (now, name),
         )
-        embed_text = f"{model_id} {name} {description}".strip()
-        self._store_vector(db, embed_text, "model_releases", str(cursor.lastrowid))
+        db.commit()
+        return True
+
+    # --- Generic Entry (for flexible storage) ---
+
+    def store_entry(
+        self, content: str, source: str = "", source_type: str = "",
+        entry_type: str = "finding", metadata: str = "",
+    ) -> bool:
+        """Store a generic knowledge entry. Falls back to the vector index
+        for semantic retrieval without requiring a dedicated table."""
+        db = self._get_db()
+        if db is None:
+            return False
+        embed_text = f"{entry_type} {source_type}: {content[:500]}"
+        self._store_vector(db, embed_text, entry_type, source or self._now_iso())
         db.commit()
         return True
 
@@ -326,7 +444,7 @@ class KnowledgeStore:
         if db is None:
             return {}
         stats = {}
-        for table in ("papers", "findings", "topics", "digests", "model_releases"):
+        for table in ("qa_reports", "bug_patterns", "release_notes", "triage_log", "apps"):
             count = db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             stats[table] = count
         return stats

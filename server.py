@@ -1,7 +1,7 @@
 """
-protoResearcher — AI research agent powered by local LLMs.
+Quinn -- QA agent for the protoLabs portfolio.
 
-Monitors Discord feeds, HuggingFace, GitHub for the latest in AI/ML research.
+Monitors apps, triages issues, generates release notes, and runs QA playbooks.
 Supports two agent backends: nanobot (legacy) and LangGraph (new).
 
 Usage:
@@ -37,18 +37,17 @@ _config = None
 
 
 def _patch_identity():
-    """Replace nanobot's default identity header with protoResearcher branding."""
+    """Replace nanobot's default identity header with Quinn branding."""
     from nanobot.agent.context import ContextBuilder
 
     _original_get_identity = ContextBuilder._get_identity
 
     def _patched_get_identity(self):
         original = _original_get_identity(self)
-        # Replace the nanobot header
-        original = original.replace("# nanobot 🐈", "# protoResearcher 🔬")
+        original = original.replace("# nanobot 🐈", "# Quinn QA")
         original = original.replace(
             "You are nanobot, a helpful AI assistant.",
-            "You are protoResearcher, an autonomous AI research assistant built by protoLabs.",
+            "You are Quinn, an autonomous QA agent built by protoLabs.",
         )
         original = original.replace("## nanobot Guidelines", "## Guidelines")
         return original
@@ -95,7 +94,7 @@ def _init_agent(config_path: str | None = None):
         channels_config=_config.channels,
     )
 
-    # Override nanobot's default identity with protoResearcher branding
+    # Override nanobot's default identity with Quinn branding
     _patch_identity()
 
 
@@ -119,7 +118,7 @@ def _init_langgraph_agent():
         include_subagents=True,
     )
 
-    print(f"[researcher] LangGraph agent initialized (model: {_graph_config.model_name})")
+    print(f"[quinn] LangGraph agent initialized (model: {_graph_config.model_name})")
 
 
 def _detect_vllm_model(api_base: str) -> str | None:
@@ -136,7 +135,7 @@ def _detect_vllm_model(api_base: str) -> str | None:
 
 
 def _make_provider(config):
-    """Create provider — auto-detects vLLM model."""
+    """Create provider -- auto-detects vLLM model."""
     from nanobot.providers.base import GenerationSettings
     from nanobot.providers.litellm_provider import LiteLLMProvider
 
@@ -150,12 +149,12 @@ def _make_provider(config):
         if detected:
             model = detected
 
-    # CLIProxyAPI is OpenAI-compatible — tell nanobot/litellm to use openai protocol
+    # CLIProxyAPI is OpenAI-compatible -- tell nanobot/litellm to use openai protocol
     effective_provider = provider_name
     api_key = p.api_key if p else None
     if provider_name == "cliproxy":
         effective_provider = "openai"
-        api_key = api_key or "protoresearcher-internal"
+        api_key = api_key or "quinn-internal"
         # litellm's openai provider needs this env var
         os.environ["OPENAI_API_KEY"] = api_key
 
@@ -181,7 +180,7 @@ def _make_provider(config):
 # ---------------------------------------------------------------------------
 
 _HELP_TEXT = """\
-**protoResearcher commands:**
+**Quinn QA commands:**
 | Command | Description |
 |---------|-------------|
 | `/new` | Clear chat history + session |
@@ -190,13 +189,14 @@ _HELP_TEXT = """\
 | `/compact` | Force memory consolidation |
 | `/model` | Show current model |
 | `/tools` | List registered tools |
-| `/topics` | Show tracked research topics |
-| `/agenda` | Show research agenda with stats |
-| `/papers [query]` | Search stored papers |
-| `/recent [n]` | Show recent findings |
-| `/audit [n]` | Show recent audit log entries |
+| `/audit` | Run full board audit across all configured apps |
+| `/qa [version]` | Run QA playbook for a version |
+| `/triage` | Triage open GitHub issues |
+| `/release [version]` | Generate release notes |
+| `/bugs` | Show active bug patterns across apps |
+| `/status` | Quick health check across apps |
+| `/report` | Generate daily QA digest and publish to Discord |
 | `/lab on\\|off\\|status` | Toggle lab mode (GPU experiment runner) |
-| `/publish` | Generate weekly digest and publish to Discord |
 | `/help` | Show this help |
 """
 
@@ -245,46 +245,58 @@ async def _handle_command(
         await _agent.memory_consolidator.maybe_consolidate_by_tokens(session)
         return _msg("Memory consolidation complete.")
 
+    # QA commands -- delegate to agent as prompts
     if cmd == "audit":
-        from audit import audit_logger
-        n = 20
-        if args.strip().isdigit():
-            n = int(args.strip())
-        entries = audit_logger.get_recent(n, session_id=session_id)
-        if not entries:
-            return _msg("No audit entries found.")
-        lines = []
-        for e in entries:
-            status = "ok" if e.get("success") else "FAIL"
-            lines.append(
-                f"- `{e['ts'][:19]}` **{e['tool']}** ({e['duration_ms']}ms) [{status}] — {e.get('result_summary', '')[:80]}"
-            )
-        return _msg(f"**Recent audit log ({len(entries)} entries):**\n" + "\n".join(lines))
+        return await _dispatch_to_agent(
+            "Run a full QA audit across all configured apps. "
+            "Check board health, CI status, open PRs, and deployment state. "
+            "Report any issues found.",
+            session_id,
+        )
 
-    # Research-specific commands
-    if cmd == "topics":
-        return await _handle_topics_command()
+    if cmd == "qa":
+        version = args.strip() or "latest"
+        return await _dispatch_to_agent(
+            f"Run the QA playbook for version {version}. "
+            f"Verify endpoints, run regression checks, validate deployment, "
+            f"and generate a QA report with PASS/WARN/FAIL verdict.",
+            session_id,
+        )
 
-    if cmd == "agenda":
-        return await _handle_agenda_command()
+    if cmd == "triage":
+        return await _dispatch_to_agent(
+            "Triage all open GitHub issues across configured apps. "
+            "Classify each as: already_fixed, actionable, stale, or duplicate. "
+            "Log triage decisions and recommend actions.",
+            session_id,
+        )
 
-    if cmd == "papers":
-        return await _handle_papers_command(args)
+    if cmd == "release":
+        version = args.strip() or "latest"
+        return await _dispatch_to_agent(
+            f"Generate release notes for version {version}. "
+            f"Gather merged PRs, categorize changes (features, fixes, breaking), "
+            f"and produce a formatted changelog.",
+            session_id,
+        )
 
-    if cmd == "recent":
-        return await _handle_recent_command(args)
+    if cmd == "bugs":
+        return await _handle_bugs_command()
+
+    if cmd == "status":
+        return await _handle_status_command()
+
+    if cmd == "report":
+        return await _handle_report_command(session_id)
 
     if cmd == "lab":
         return await _handle_lab_command(args)
-
-    if cmd == "publish":
-        return await _handle_publish_command(session_id)
 
     return None
 
 
 # ---------------------------------------------------------------------------
-# Research commands
+# QA commands
 # ---------------------------------------------------------------------------
 
 _knowledge_store = None
@@ -298,132 +310,129 @@ def _get_store():
     return _knowledge_store
 
 
-async def _handle_topics_command() -> list[dict[str, Any]]:
-    store = _get_store()
-    topics = store.get_topics()
-    if not topics:
-        return _msg("No research topics configured. Ask me to add topics or use the research_memory tool.")
+async def _dispatch_to_agent(
+    prompt: str, session_id: str,
+) -> list[dict[str, Any]]:
+    """Send a prompt to the active agent backend and return the response."""
+    if _BACKEND == "langgraph" and _graph is not None:
+        return await _chat_langgraph(prompt, session_id)
+    elif _agent is not None:
+        return await _chat_nanobot(prompt, session_id)
+    return _msg("**Error:** No agent backend initialized.")
 
-    lines = ["**Research Topics:**"]
-    for t in topics:
-        kw = json.loads(t.get("keywords", "[]"))
-        kw_str = ", ".join(kw[:5]) if kw else ""
-        scanned = t.get("last_scanned_at", "never") or "never"
+
+async def _handle_bugs_command() -> list[dict[str, Any]]:
+    """Show active (unresolved) bug patterns across all apps."""
+    store = _get_store()
+    bugs = store.get_bug_patterns(unresolved_only=True, limit=30)
+    if not bugs:
+        return _msg("No active bug patterns recorded.")
+
+    lines = ["**Active Bug Patterns:**"]
+    for b in bugs:
+        app = b.get("app_name", "?") or "global"
+        sev = b.get("severity", "?")
+        occ = b.get("occurrences", 1)
         lines.append(
-            f"- **{t['name']}** (P{t['priority']}) — {t.get('description', '')}\n"
-            f"  Keywords: {kw_str} | Last scanned: {scanned}"
+            f"- [{sev}] **{b['title']}** ({app}) -- seen {occ}x, last: {b.get('last_seen', '')[:10]}"
         )
     return _msg("\n".join(lines))
 
 
-async def _handle_agenda_command() -> list[dict[str, Any]]:
+async def _handle_status_command() -> list[dict[str, Any]]:
+    """Quick health check: show stats and recent activity."""
     store = _get_store()
     stats = store.get_stats()
-    topics = store.get_topics()
+    apps = store.get_apps()
 
-    lines = ["**Research Agenda:**", ""]
-    lines.append(f"Papers tracked: {stats.get('papers', 0)}")
-    lines.append(f"Findings stored: {stats.get('findings', 0)}")
-    lines.append(f"Digests generated: {stats.get('digests', 0)}")
-    lines.append(f"Model releases: {stats.get('model_releases', 0)}")
-    lines.append(f"Active topics: {len(topics)}")
+    lines = ["**Quinn QA Status:**", ""]
+    lines.append(f"QA reports: {stats.get('qa_reports', 0)}")
+    lines.append(f"Bug patterns (active): {stats.get('bug_patterns', 0)}")
+    lines.append(f"Release notes: {stats.get('release_notes', 0)}")
+    lines.append(f"Triage entries: {stats.get('triage_log', 0)}")
+    lines.append(f"Tracked apps: {stats.get('apps', 0)}")
 
-    if topics:
-        lines.append("\n**Topics by priority:**")
-        for t in topics:
-            lines.append(f"- P{t['priority']}: {t['name']}")
+    if apps:
+        lines.append("\n**Tracked Apps:**")
+        for a in apps:
+            last = a.get("last_checked_at", "never") or "never"
+            lines.append(f"- **{a['name']}** -- last checked: {last[:10] if last != 'never' else 'never'}")
 
-    return _msg("\n".join(lines))
-
-
-async def _handle_papers_command(args: str) -> list[dict[str, Any]]:
-    store = _get_store()
-    query = args.strip()
-
-    if query:
-        results = store.search(query, k=10, filter_table="papers")
-        if not results:
-            return _msg(f"No papers found matching '{query}'.")
-        lines = [f"**Papers matching '{query}':**"]
-        for i, r in enumerate(results, 1):
-            lines.append(f"{i}. [{r['source_id']}] {r['preview']}")
-        return _msg("\n".join(lines))
-    else:
-        papers = store.get_papers(limit=10)
-        if not papers:
-            return _msg("No papers in the knowledge base yet.")
-        lines = ["**Recent papers:**"]
-        for p in papers:
-            sig = p.get("significance", "?")
-            lines.append(f"- [{sig}] **{p['title']}** ({p['id']})")
-        return _msg("\n".join(lines))
-
-
-async def _handle_recent_command(args: str) -> list[dict[str, Any]]:
-    store = _get_store()
-    n = 10
-    if args.strip().isdigit():
-        n = int(args.strip())
-
-    # Show recent papers + findings
-    papers = store.get_papers(limit=n)
-    lines = []
-
-    if papers:
-        lines.append("**Recent papers:**")
-        for p in papers[:n]:
-            sig = p.get("significance", "?")
-            lines.append(f"- [{sig}] {p['title']} ({p['id']}) — {p.get('discovered_at', '')[:10]}")
-
-    if not lines:
-        return _msg("No recent research activity.")
+    # Show recent reports
+    recent = store.get_reports(limit=5)
+    if recent:
+        lines.append("\n**Recent Reports:**")
+        for r in recent:
+            lines.append(
+                f"- [{r['verdict']}] {r['app_name']} {r.get('version', '')} "
+                f"({r.get('scope', '')}) -- {r.get('created_at', '')[:10]}"
+            )
 
     return _msg("\n".join(lines))
 
 
-async def _handle_publish_command(session_id: str) -> list[dict[str, Any]]:
-    """Generate a digest and publish to Discord via webhook."""
-    import os
+async def _handle_report_command(session_id: str) -> list[dict[str, Any]]:
+    """Generate a daily QA digest and optionally publish to Discord."""
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "")
-    if not webhook_url:
-        return _msg("**Error:** DISCORD_WEBHOOK_URL not set.")
 
-    # Gather research data for the digest
     store = _get_store()
     stats = store.get_stats()
-    papers = store.get_papers(limit=15)
-    topics = store.get_topics()
+    bugs = store.get_bug_patterns(unresolved_only=True, limit=10)
+    reports = store.get_reports(limit=10)
+    apps = store.get_apps()
 
-    # Build the newsletter
     from datetime import datetime, timezone
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    lines = [f"**🔬 protoResearcher Weekly Digest — {date_str}**\n"]
+    lines = [f"**Quinn QA Daily Digest -- {date_str}**\n"]
 
     if stats:
-        lines.append(f"📊 **Knowledge Base:** {stats.get('papers', 0)} papers, "
-                     f"{stats.get('findings', 0)} findings, {stats.get('model_releases', 0)} model releases\n")
+        lines.append(
+            f"**Knowledge Base:** {stats.get('qa_reports', 0)} reports, "
+            f"{stats.get('bug_patterns', 0)} bug patterns, "
+            f"{stats.get('triage_log', 0)} triage entries\n"
+        )
 
-    if papers:
-        lines.append("**📄 Recent Papers:**")
-        for p in papers[:10]:
-            sig = p.get("significance", "?")
-            lines.append(f"• [{sig}] {p['title']}")
+    if reports:
+        lines.append("**Recent QA Reports:**")
+        for r in reports[:5]:
+            lines.append(
+                f"- [{r['verdict']}] {r['app_name']} {r.get('version', '')} "
+                f"({r.get('checks_passed', 0)}/{r.get('checks_total', 0)} checks)"
+            )
         lines.append("")
 
-    if topics:
-        lines.append("**🎯 Active Topics:** " + ", ".join(t["name"] for t in topics))
+    if bugs:
+        lines.append("**Active Bug Patterns:**")
+        for b in bugs[:5]:
+            sev = b.get("severity", "?")
+            lines.append(f"- [{sev}] {b['title']} ({b.get('app_name', 'global')})")
+        lines.append("")
 
-    lines.append("\n_Generated by protoResearcher — protoLabs.studio_")
+    if apps:
+        lines.append("**Tracked Apps:** " + ", ".join(a["name"] for a in apps))
+
+    lines.append(f"\n_Generated by Quinn QA -- protoLabs.studio_")
 
     digest_content = "\n".join(lines)
+
+    # Store as a report
+    store.add_report(
+        app_name="all",
+        content=digest_content,
+        verdict="INFO",
+        scope="digest",
+    )
+
+    if not webhook_url:
+        return _msg(f"{digest_content}\n\n_DISCORD_WEBHOOK_URL not set -- not published._")
 
     # Publish via webhook
     import httpx
     payload = {
-        "username": "protoResearcher",
+        "username": "Quinn QA",
         "embeds": [{
-            "title": f"🔬 Weekly Research Digest — {date_str}",
+            "title": f"QA Daily Digest -- {date_str}",
             "description": digest_content[:4096],
             "color": 0x14b8a6,
         }],
@@ -440,7 +449,7 @@ async def _handle_publish_command(session_id: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Lab mode — toggleable GPU experiment runner
+# Lab mode -- toggleable GPU experiment runner
 # ---------------------------------------------------------------------------
 
 _lab_mode = False
@@ -449,7 +458,6 @@ _lab_tool = None
 
 def _is_lab_available() -> bool:
     """Check if GPU/lab dependencies are available."""
-    import os
     return os.path.exists("/opt/llama-factory") or os.environ.get("LAB_GPU") is not None
 
 
@@ -470,7 +478,6 @@ async def _handle_lab_command(args: str) -> list[dict[str, Any]]:
         _agent.tools.register(_lab_tool)
         _lab_mode = True
 
-        import os
         gpu = os.environ.get("LAB_GPU", "1")
         return _msg(
             f"**Lab mode ON.** `lab_bench` tool registered.\n"
@@ -516,17 +523,17 @@ def _install_audit_wrapper():
 
     original_execute = _agent.tools.execute
 
-    # Map tool names to research phase spans for Langfuse
+    # Map tool names to QA phase spans for Langfuse
     _TOOL_PHASE_MAP = {
-        "discord_feed": "explorer",
-        "huggingface": "explorer",
-        "github_trending": "explorer",
-        "web_search": "explorer",
-        "web_fetch": "explorer",
-        "browser": "explorer",
-        "paper_reader": "analyst",
-        "research_memory": "analyst",
-        "message": "writer",
+        "discord_feed": "monitor",
+        "huggingface": "monitor",
+        "github_trending": "monitor",
+        "web_search": "auditor",
+        "web_fetch": "auditor",
+        "browser": "verifier",
+        "paper_reader": "auditor",
+        "research_memory": "auditor",
+        "message": "reporter",
     }
 
     async def _audited_execute(name: str, params: dict[str, Any]) -> str:
@@ -586,7 +593,7 @@ def _strip_think(text: str) -> str:
     return text.strip()
 
 
-# Captured message tool content — nanobot sends final responses via message() tool
+# Captured message tool content -- nanobot sends final responses via message() tool
 _message_tool_content: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
     "_message_tool_content", default=[]
 )
@@ -619,7 +626,7 @@ async def _chat_nanobot(message: str, session_id: str) -> list[dict[str, Any]]:
     import tracing
     token = _current_session_id.set(session_id)
     msg_token = _message_tool_content.set([])
-    tracing.start_trace(session_id=session_id, name="researcher-chat", metadata={"message_preview": message[:100]})
+    tracing.start_trace(session_id=session_id, name="quinn-chat", metadata={"message_preview": message[:100]})
     try:
         progress_messages: list[dict] = []
 
@@ -630,13 +637,13 @@ async def _chat_nanobot(message: str, session_id: str) -> list[dict[str, Any]]:
             if tool_hint:
                 progress_messages.append({
                     "role": "assistant",
-                    "metadata": {"title": f"🔧 {content}"},
+                    "metadata": {"title": f">> {content}"},
                     "content": "",
                 })
             else:
                 progress_messages.append({
                     "role": "assistant",
-                    "metadata": {"title": "💭 Thinking"},
+                    "metadata": {"title": "Thinking"},
                     "content": content,
                 })
 
@@ -668,7 +675,7 @@ async def _chat_langgraph(message: str, session_id: str) -> list[dict[str, Any]]
     import tracing
     from langchain_core.messages import HumanMessage, AIMessage
 
-    tracing.start_trace(session_id=session_id, name="researcher-chat-lg", metadata={"message_preview": message[:100]})
+    tracing.start_trace(session_id=session_id, name="quinn-chat-lg", metadata={"message_preview": message[:100]})
     try:
         # Invoke the graph with session-scoped checkpointing
         config = {"configurable": {"thread_id": f"gradio:{session_id}"}}
@@ -697,7 +704,7 @@ async def _chat_langgraph(message: str, session_id: str) -> list[dict[str, Any]]
 
 
 def chat_streaming(message: str, history: list[dict], session_id: str):
-    """Streaming wrapper — yields incremental history updates as tools run."""
+    """Streaming wrapper -- yields incremental history updates as tools run."""
     import threading
 
     result_queue: _queue_mod.Queue = _queue_mod.Queue()
@@ -746,7 +753,7 @@ def chat_streaming(message: str, history: list[dict], session_id: str):
             if not placeholder_shown:
                 history.append({
                     "role": "assistant",
-                    "metadata": {"title": "🔬 Working..."},
+                    "metadata": {"title": "Working..."},
                     "content": "",
                 })
                 placeholder_shown = True
@@ -817,7 +824,7 @@ def _build_settings_callbacks() -> dict:
             except Exception:
                 pass
         else:
-            # LangGraph backend — check vLLM directly
+            # LangGraph backend -- check vLLM directly
             detected = _detect_vllm_model("http://host.docker.internal:8000/v1")
             if detected:
                 choices.append(f"local: {detected}")
@@ -897,7 +904,7 @@ def _build_settings_callbacks() -> dict:
             )
         elif provider_type == "claude":
             provider = LiteLLMProvider(
-                api_key="protoresearcher-internal",
+                api_key="quinn-internal",
                 api_base="http://127.0.0.1:8317/v1",
                 default_model=f"openai/{model_name}",
                 provider_name="openai",
@@ -923,7 +930,7 @@ def _build_settings_callbacks() -> dict:
             display_model = (_agent.model or "").replace("openai/", "")
         else:
             display_model = "unknown"
-        return f"**🔬 protoResearcher** &nbsp; `{display_model}`"
+        return f"**Quinn QA** &nbsp; `{display_model}`"
 
     def get_knowledge_stats() -> str:
         store = _get_store()
@@ -951,33 +958,34 @@ def _build_settings_callbacks() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _seed_topics():
-    """Seed default research topics from config."""
+def _seed_apps():
+    """Seed default tracked apps from config."""
     try:
-        config_path = Path(__file__).parent / "config" / "research-config.json"
+        config_path = Path(__file__).parent / "config" / "qa-config.json"
         if not config_path.exists():
-            config_path = Path("/opt/protoresearcher/config/research-config.json")
+            config_path = Path("/opt/quinn/config/qa-config.json")
         if not config_path.exists():
             return
 
-        research_config = json.loads(config_path.read_text())
+        qa_config = json.loads(config_path.read_text())
         store = _get_store()
-        existing = {t["name"] for t in store.get_topics(active_only=False)}
+        existing = {a["name"] for a in store.get_apps()}
 
-        for topic in research_config.get("topics", []):
-            if topic["name"] not in existing:
-                store.add_topic(
-                    name=topic["name"],
-                    keywords=topic.get("keywords", []),
-                    priority=topic.get("priority", 2),
+        for app in qa_config.get("apps", []):
+            if app["name"] not in existing:
+                store.add_app(
+                    name=app["name"],
+                    github_repo=app.get("github_repo", ""),
+                    server_url=app.get("server_url", ""),
+                    config=app.get("config"),
                 )
-        print(f"[researcher] Seeded {len(research_config.get('topics', []))} research topics")
+        print(f"[quinn] Seeded {len(qa_config.get('apps', []))} tracked apps")
     except Exception as e:
-        print(f"[researcher] Topic seeding failed: {e}")
+        print(f"[quinn] App seeding failed: {e}")
 
 
 def _main():
-    parser = argparse.ArgumentParser(description="protoResearcher Gradio UI")
+    parser = argparse.ArgumentParser(description="Quinn QA Gradio UI")
     parser.add_argument("--port", type=int, default=7870)
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--share", action="store_true")
@@ -989,7 +997,7 @@ def _main():
     tracing.init()
     metrics.init()
 
-    print(f"[researcher] Agent backend: {_BACKEND}")
+    print(f"[quinn] Agent backend: {_BACKEND}")
 
     if _BACKEND == "langgraph":
         _init_langgraph_agent()
@@ -1013,22 +1021,22 @@ def _main():
 
         if os.environ.get("DISCORD_BOT_TOKEN"):
             _agent.tools.register(DiscordFeedTool())
-            print("[researcher] Discord feed tool registered")
+            print("[quinn] Discord feed tool registered")
         else:
-            print("[researcher] Discord feed: skipped (no DISCORD_BOT_TOKEN)")
+            print("[quinn] Discord feed: skipped (no DISCORD_BOT_TOKEN)")
 
-    # Seed default research topics
-    _seed_topics()
+    # Seed default tracked apps
+    _seed_apps()
 
-    # Start Discord bot (watches for 🔬 reactions and @mentions)
+    # Start Discord bot (watches for reactions and @mentions)
     from discord_bot import start_bot
     start_bot()
 
     blocks = create_chat_app(
         chat_fn=chat,
-        title="🔬 protoResearcher",
+        title="Quinn QA",
         subtitle="",
-        placeholder="Ask me about the latest in AI research...",
+        placeholder="Ask me about app health, bugs, releases, or run a QA audit...",
         settings=_build_settings_callbacks(),
         pwa=True,
     )
@@ -1044,7 +1052,7 @@ def _main():
 
     static_dir = Path(__file__).parent / "static"
 
-    fastapi_app = FastAPI(title="protoResearcher — protoLabs")
+    fastapi_app = FastAPI(title="Quinn QA -- protoLabs")
 
     # Chat API endpoint (for evals and programmatic access)
     from pydantic import BaseModel as PydanticBaseModel
@@ -1088,7 +1096,7 @@ def _main():
                     headers={"Service-Worker-Allowed": "/"},
                 )
 
-        fastapi_app.mount("/static", StaticFiles(directory=str(static_dir)), name="ava-static")
+        fastapi_app.mount("/static", StaticFiles(directory=str(static_dir)), name="quinn-static")
 
     app = gr.mount_gradio_app(
         fastapi_app, blocks, path="/",
@@ -1096,7 +1104,7 @@ def _main():
         favicon_path=str(static_dir / "favicon.svg") if (static_dir / "favicon.svg").exists() else None,
     )
 
-    print(f"[protoResearcher] Starting on http://0.0.0.0:{args.port}")
+    print(f"[quinn] Starting on http://0.0.0.0:{args.port}")
     uvicorn.run(app, host="0.0.0.0", port=args.port)
 
 

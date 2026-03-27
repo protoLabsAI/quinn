@@ -1,4 +1,4 @@
-"""Guardrails, query rewriting, caching, and document grading for protoResearcher.
+"""Guardrails, query rewriting, caching, and document grading for Quinn QA.
 
 Patterns adopted from production-agentic-rag-course:
 - Scope validation before tool calls (0-100 score, threshold 60)
@@ -17,23 +17,24 @@ from typing import Any
 import httpx
 
 # ---------------------------------------------------------------------------
-# Guardrails — validate query is within AI/ML research scope
+# Guardrails -- validate query is within QA/DevOps scope
 # ---------------------------------------------------------------------------
 
-_GUARDRAIL_PROMPT = """Score this query's relevance to AI/ML research on a scale of 0-100.
+_GUARDRAIL_PROMPT = """Score this query's relevance to software QA, testing, and DevOps on a scale of 0-100.
 
 Categories that score HIGH (70-100):
-- LLM architectures, training, inference optimization
-- Model releases, benchmarks, evaluations
-- Machine learning methods (RL, DPO, fine-tuning, etc.)
-- AI tools, frameworks, libraries
-- Research papers, arxiv discussions
-- AI agents, tool use, MCP
-- Video/image generation models
+- Bug reports, bug triage, issue management
+- QA audits, test plans, regression testing
+- Release notes, changelogs, versioning
+- CI/CD pipelines, deployment verification
+- PR reviews, code review feedback
+- App health checks, endpoint monitoring
+- Software quality metrics, coverage reports
+- GitHub issues, board management, feature tracking
 
 Categories that score LOW (0-30):
 - Cooking, sports, entertainment, politics
-- General coding unrelated to AI/ML
+- General coding unrelated to QA/testing
 - Personal questions, small talk
 
 Respond with ONLY a JSON object like this example: {{"score": 25, "reason": "brief reason"}}
@@ -42,22 +43,24 @@ Query: {query}"""
 
 
 async def check_guardrail(query: str, llm_url: str = "http://127.0.0.1:8317/v1", threshold: int = 60) -> dict:
-    """Check if a query is within AI/ML research scope.
+    """Check if a query is within QA/DevOps scope.
 
     Returns: {"pass": bool, "score": int, "reason": str}
     """
     if not query.strip():
         return {"pass": True, "score": 100, "reason": "empty query"}
 
-    # Quick heuristic bypass for obvious research queries
-    research_keywords = [
-        "paper", "arxiv", "model", "llm", "training", "inference", "gpu",
-        "transformer", "attention", "lora", "dpo", "rlhf", "benchmark",
-        "huggingface", "github", "discord", "scan", "research", "digest",
-        "moe", "quantiz", "vllm", "agent", "rag", "embedding",
+    # Quick heuristic bypass for obvious QA queries
+    qa_keywords = [
+        "bug", "test", "qa", "audit", "release", "deploy", "ci", "cd",
+        "pipeline", "regression", "triage", "issue", "pr", "pull request",
+        "merge", "health", "endpoint", "status", "report", "verify",
+        "check", "scan", "board", "feature", "fix", "broken", "fail",
+        "error", "crash", "log", "alert", "monitor", "coverage",
+        "github", "discord", "webhook", "version", "changelog",
     ]
     query_lower = query.lower()
-    if any(kw in query_lower for kw in research_keywords):
+    if any(kw in query_lower for kw in qa_keywords):
         return {"pass": True, "score": 90, "reason": "keyword match"}
 
     # LLM-based check
@@ -65,7 +68,7 @@ async def check_guardrail(query: str, llm_url: str = "http://127.0.0.1:8317/v1",
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{llm_url}/chat/completions",
-                headers={"Authorization": "Bearer protoresearcher-internal"},
+                headers={"Authorization": "Bearer quinn-internal"},
                 json={
                     "model": "claude-sonnet-4-6",
                     "messages": [{"role": "user", "content": _GUARDRAIL_PROMPT.format(query=query)}],
@@ -75,7 +78,7 @@ async def check_guardrail(query: str, llm_url: str = "http://127.0.0.1:8317/v1",
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
-            # Parse JSON from response — handle think blocks, markdown fences
+            # Parse JSON from response -- handle think blocks, markdown fences
             import re
             content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
             content = re.sub(r'```json?\s*', '', content).replace('```', '').strip()
@@ -90,7 +93,7 @@ async def check_guardrail(query: str, llm_url: str = "http://127.0.0.1:8317/v1",
 
 
 # ---------------------------------------------------------------------------
-# Response caching — SHA256(query) with TTL
+# Response caching -- SHA256(query) with TTL
 # ---------------------------------------------------------------------------
 
 _CACHE_DB_PATH = Path("/sandbox/knowledge/cache.db")
@@ -137,7 +140,7 @@ def cache_get(query: str) -> str | None:
             response, created_at = row
             if time.time() - created_at < _CACHE_TTL:
                 return response
-            # Expired — delete
+            # Expired -- delete
             _cache_db.execute("DELETE FROM response_cache WHERE key = ?", (key,))
             _cache_db.commit()
     except Exception:
@@ -166,12 +169,12 @@ def cache_set(query: str, response: str):
 
 
 # ---------------------------------------------------------------------------
-# Document grading — quick binary relevance check
+# Document grading -- quick binary relevance check
 # ---------------------------------------------------------------------------
 
-_GRADE_PROMPT = """Is this document relevant to the research query? Answer with ONLY "yes" or "no".
+_GRADE_PROMPT = """Is this document relevant to the QA query? Answer with ONLY "yes" or "no".
 
-Research query: {query}
+QA query: {query}
 
 Document excerpt (first 500 chars):
 {excerpt}"""
@@ -188,7 +191,7 @@ async def grade_document(query: str, content: str, llm_url: str = "http://127.0.
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 f"{llm_url}/chat/completions",
-                headers={"Authorization": "Bearer protoresearcher-internal"},
+                headers={"Authorization": "Bearer quinn-internal"},
                 json={
                     "model": "claude-sonnet-4-6",
                     "messages": [{"role": "user", "content": _GRADE_PROMPT.format(query=query, excerpt=excerpt)}],
@@ -205,10 +208,10 @@ async def grade_document(query: str, content: str, llm_url: str = "http://127.0.
 
 
 # ---------------------------------------------------------------------------
-# Query rewriting — improve sparse queries
+# Query rewriting -- improve sparse queries
 # ---------------------------------------------------------------------------
 
-_REWRITE_PROMPT = """The following research query returned sparse or no results. Rewrite it to be more effective for searching AI/ML research papers, models, and repositories.
+_REWRITE_PROMPT = """The following QA query returned sparse or no results. Rewrite it to be more effective for searching bug reports, QA reports, release notes, and triage logs.
 
 Original query: {query}
 
@@ -221,7 +224,7 @@ async def rewrite_query(query: str, llm_url: str = "http://127.0.0.1:8317/v1") -
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 f"{llm_url}/chat/completions",
-                headers={"Authorization": "Bearer protoresearcher-internal"},
+                headers={"Authorization": "Bearer quinn-internal"},
                 json={
                     "model": "claude-sonnet-4-6",
                     "messages": [{"role": "user", "content": _REWRITE_PROMPT.format(query=query)}],
@@ -235,11 +238,12 @@ async def rewrite_query(query: str, llm_url: str = "http://127.0.0.1:8317/v1") -
     except Exception:
         # Fallback: simple keyword expansion
         expansions = {
-            "moe": "mixture of experts MoE",
-            "rag": "retrieval augmented generation RAG",
-            "rlhf": "reinforcement learning human feedback RLHF",
-            "dpo": "direct preference optimization DPO",
-            "lora": "low-rank adaptation LoRA fine-tuning",
+            "ci": "continuous integration CI pipeline checks",
+            "cd": "continuous deployment CD release",
+            "pr": "pull request PR review merge",
+            "qa": "quality assurance QA testing verification",
+            "e2e": "end-to-end E2E integration test",
+            "flaky": "flaky test intermittent failure",
         }
         result = query
         for short, expanded in expansions.items():
