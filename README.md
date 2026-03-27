@@ -62,7 +62,7 @@ INFISICAL_API_URL=https://secrets.proto-labs.ai infisical run --env prod -- dock
 
 This pulls 24 secrets from Infisical, injects them as env vars, and starts Quinn. No `.env` files needed.
 
-Quinn's UI will be available at **http://localhost:7871**.
+Quinn's UI will be available at **http://localhost:7873**.
 
 ### 3. Auto-start on boot (systemd)
 

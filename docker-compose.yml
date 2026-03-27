@@ -32,7 +32,7 @@ services:
       - ${HOME}/.claude:/opt/claude-creds:ro
 
     ports:
-      - "7871:7870"
+      - "7873:7870"
 
     # Network: host protoLabs Studio + Ollama access
     extra_hosts:

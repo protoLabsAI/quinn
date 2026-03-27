@@ -35,6 +35,7 @@ RUN pip install --no-cache-dir \
     langchain langchain-openai langgraph websockets
 
 # Install Quinn
+COPY nanobot/ /opt/quinn/nanobot/
 COPY tools/ /opt/quinn/tools/
 COPY knowledge/ /opt/quinn/knowledge/
 COPY graph/ /opt/quinn/graph/
@@ -61,6 +62,8 @@ RUN mkdir -p /opt/.cliproxy \
     && chown -R sandbox:sandbox /opt/.cliproxy
 
 # Drop to sandbox user
+ENV PYTHONPATH=/opt/quinn
+
 USER sandbox
 WORKDIR /sandbox
 

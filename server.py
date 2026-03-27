@@ -23,7 +23,7 @@ from typing import Any
 from chat_ui import create_chat_app
 
 # Agent backend selection
-_BACKEND = os.environ.get("AGENT_BACKEND", "nanobot")
+_BACKEND = os.environ.get("AGENT_BACKEND", "langgraph")
 
 # ---------------------------------------------------------------------------
 # Agent setup
