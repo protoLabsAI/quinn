@@ -18,8 +18,27 @@ from nanobot.agent.tools.base import Tool
 
 _DISCORD_API = "https://discord.com/api/v10"
 _BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
-_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "1070606339363049492")
+_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "")
 _TIMEOUT = 15
+
+# Resolved at first use — queries bot's guild list if env var is empty
+_resolved_guild_id: str | None = None
+
+
+async def _get_guild_id() -> str:
+    """Get the guild ID. Uses env var first, then queries the bot's guild list at runtime."""
+    global _resolved_guild_id
+    if _resolved_guild_id:
+        return _resolved_guild_id
+    if _GUILD_ID:
+        _resolved_guild_id = _GUILD_ID
+        return _GUILD_ID
+    # Quinn is only in one guild — just ask Discord which one
+    guilds = await _api("GET", "/users/@me/guilds")
+    if isinstance(guilds, list) and guilds:
+        _resolved_guild_id = guilds[0]["id"]
+        return _resolved_guild_id
+    return ""
 
 
 async def _api(
@@ -79,10 +98,13 @@ class DiscordAdminTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         action = kwargs.get("action", "")
-        guild_id = kwargs.get("guild_id", _GUILD_ID)
+        guild_id = kwargs.get("guild_id") or await _get_guild_id()
 
         if not _BOT_TOKEN:
             return "Error: DISCORD_BOT_TOKEN not set"
+
+        if not guild_id:
+            return "Error: Could not resolve guild ID. Set DISCORD_GUILD_ID or ensure bot is in a server."
 
         # --- Server Info ---
         if action == "server_info":
