@@ -288,9 +288,13 @@ async def release_notes(
 # ---------------------------------------------------------------------------
 
 def create_qa_memory_tool(store=None):
-    """Factory: creates qa_memory tool with injected QAKnowledgeStore."""
+    """Factory: creates qa_memory tool with its own QAKnowledgeStore.
+
+    The store parameter is ignored — QAMemoryTool always uses QAKnowledgeStore
+    (not the base KnowledgeStore from the middleware, which has different methods).
+    """
     from tools.qa_memory import QAKnowledgeStore, QAMemoryTool
-    _tool = QAMemoryTool(store or QAKnowledgeStore())
+    _tool = QAMemoryTool(QAKnowledgeStore())
 
     @tool
     async def qa_memory(
