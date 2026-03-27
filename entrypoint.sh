@@ -1,5 +1,7 @@
 #!/bin/bash
 # Quinn — container entrypoint
+# Secrets are injected by `infisical run` wrapping this script.
+# See docker-compose.yml for the infisical run command.
 
 echo "[entrypoint] Starting Quinn"
 
@@ -8,28 +10,6 @@ mkdir -p /home/sandbox/.local
 
 # Ensure persistent volume dirs exist
 mkdir -p /sandbox/audit /sandbox/knowledge
-
-# --- Infisical secret injection ---
-# Pull secrets from Infisical at startup if configured.
-# Requires INFISICAL_TOKEN (service token or machine identity) in the environment.
-if [ -n "$INFISICAL_TOKEN" ] && command -v infisical &>/dev/null; then
-    echo "[entrypoint] Pulling secrets from Infisical..."
-    INFISICAL_DOMAIN="${INFISICAL_API_URL:-https://secrets.proto-labs.ai}"
-    INFISICAL_PROJECT="${INFISICAL_PROJECT_ID:-11e172e0-a1f6-41d5-9464-df72779a7063}"
-    INFISICAL_ENV="${INFISICAL_ENVIRONMENT:-prod}"
-
-    # Export secrets as env vars for this process tree
-    eval "$(infisical export \
-        --domain "$INFISICAL_DOMAIN" \
-        --projectId "$INFISICAL_PROJECT" \
-        --env "$INFISICAL_ENV" \
-        --format dotenv \
-        --token "$INFISICAL_TOKEN" 2>/dev/null | sed 's/^/export /')" \
-    && echo "[entrypoint] Secrets loaded from Infisical ($INFISICAL_ENV)" \
-    || echo "[entrypoint] WARNING: Infisical secret fetch failed, falling back to env vars"
-else
-    echo "[entrypoint] Infisical not configured, using direct env vars"
-fi
 
 # Map Quinn-specific secret names to standard env vars
 if [ -n "$DISCORD_BOT_QUINN" ] && [ -z "$DISCORD_BOT_TOKEN" ]; then

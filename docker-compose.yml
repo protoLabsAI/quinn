@@ -47,17 +47,15 @@ services:
         reservations:
           memory: 512M
 
+    # Secrets injected by `infisical run` wrapping docker compose.
+    # Usage: infisical run --env prod -- docker compose up
+    # All 24 secrets from Infisical are passed through as env vars.
     environment:
       - HOME=/home/sandbox
-      # Infisical — pull all secrets at startup (preferred)
-      - INFISICAL_TOKEN=${INFISICAL_TOKEN:-}
-      - INFISICAL_API_URL=${INFISICAL_API_URL:-https://secrets.proto-labs.ai}
-      - INFISICAL_PROJECT_ID=${INFISICAL_PROJECT_ID:-11e172e0-a1f6-41d5-9464-df72779a7063}
-      - INFISICAL_ENVIRONMENT=${INFISICAL_ENVIRONMENT:-prod}
-      # Fallback: direct env vars (used when Infisical is not configured)
+      # These are populated by infisical run on the host
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
-      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+      - DISCORD_BOT_QUINN=${DISCORD_BOT_QUINN:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       # protoLabs Studio API
       - PROTOLABS_SERVER_URL=${PROTOLABS_SERVER_URL:-http://host.docker.internal:3008}
