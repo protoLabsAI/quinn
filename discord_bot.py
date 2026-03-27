@@ -380,23 +380,40 @@ async def _register_slash_commands(application_id: str):
 # Agent interaction (calls the Gradio /api/chat endpoint)
 # ---------------------------------------------------------------------------
 
-async def _ask_agent(prompt: str, session_id: str) -> str:
-    """Send a prompt to Quinn's LangGraph agent and return the response text."""
+async def _ask_agent(prompt: str, session_id: str, retries: int = 2) -> str:
+    """Send a prompt to Quinn's LangGraph agent and return the response text.
+
+    Retries on 401/502 (CLIProxyAPI token refresh) with exponential backoff.
+    Returns empty string on persistent failure so callers can distinguish
+    errors from real responses.
+    """
     client = await _get_client()
-    try:
-        resp = await client.post(
-            _CHAT_URL,
-            json={"message": prompt, "session_id": session_id},
-            timeout=600,
-        )
-        resp.raise_for_status()
-        return resp.json().get("response", "")
-    except httpx.HTTPStatusError as exc:
-        log.error("Agent HTTP error: %s", exc.response.status_code)
-        return f"Agent returned an error (HTTP {exc.response.status_code})."
-    except httpx.RequestError as exc:
-        log.error("Agent request failed: %s", exc)
-        return "Could not reach the agent. The server may still be starting up."
+    for attempt in range(retries + 1):
+        try:
+            resp = await client.post(
+                _CHAT_URL,
+                json={"message": prompt, "session_id": session_id},
+                timeout=600,
+            )
+            resp.raise_for_status()
+            return resp.json().get("response", "")
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status in (401, 502) and attempt < retries:
+                wait = 30 * (attempt + 1)
+                log.warning("Agent HTTP %d — retrying in %ds (attempt %d/%d)", status, wait, attempt + 1, retries)
+                await asyncio.sleep(wait)
+                continue
+            log.error("Agent HTTP error: %s (after %d attempts)", status, attempt + 1)
+            return ""
+        except httpx.RequestError as exc:
+            if attempt < retries:
+                wait = 15 * (attempt + 1)
+                log.warning("Agent request failed — retrying in %ds: %s", wait, exc)
+                await asyncio.sleep(wait)
+                continue
+            log.error("Agent request failed (after %d attempts): %s", attempt + 1, exc)
+            return ""
 
 
 # ---------------------------------------------------------------------------
@@ -855,7 +872,7 @@ async def post_daily_digest(channel_id: str | None = None):
 
     result = await _ask_agent(prompt, session_id)
     if not result:
-        log.warning("Daily digest: agent returned empty response")
+        log.warning("Daily digest: agent returned empty response (likely auth error) — skipping post")
         return
 
     header = "**Daily QA Digest**\n\n"
