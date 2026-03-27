@@ -2,7 +2,7 @@
 
 model:
   provider: cliproxy
-  name: claude-opus-4-6
+  name: claude-sonnet-4-6
   api_base: http://127.0.0.1:8317/v1
   api_key: quinn-internal
   temperature: 0.2
