@@ -1,0 +1,23 @@
+{
+  "apps": [
+    {
+      "name": "my-app",
+      "projectPath": "/path/to/your/project",
+      "serverUrl": "http://localhost:3008",
+      "githubRepo": "your-org/your-repo"
+    }
+  ],
+  "thresholds": {
+    "stalePrHours": 48,
+    "staleIssuesDays": 30,
+    "maxBlockedFeatures": 3,
+    "reviewQueueMax": 5
+  },
+  "discord": {
+    "channels": {
+      "releases": "",
+      "dev": "",
+      "bug-reports": ""
+    }
+  }
+}
