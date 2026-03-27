@@ -47,6 +47,10 @@ _GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "1070606339363049492")
 _WELCOME_CHANNEL_ID = os.environ.get("WELCOME_CHANNEL_ID", "")
 _MOD_LOG_CHANNEL_ID = os.environ.get("MODERATION_LOG_CHANNEL_ID", "")
 
+# Admin-only interaction: only users with these role IDs can chat with Quinn via @mention.
+# Server admins and the bot owner. Empty list = everyone can chat.
+_ADMIN_ROLE_IDS = set(filter(None, os.environ.get("QUINN_ADMIN_ROLE_IDS", "").split(",")))
+
 # Intents bitmask:
 # GUILDS (1<<0) | GUILD_MEMBERS (1<<1) | GUILD_MESSAGES (1<<9)
 # | GUILD_MESSAGE_REACTIONS (1<<10) | MESSAGE_CONTENT (1<<15)
@@ -232,6 +236,89 @@ def _split_message(content: str) -> list[str]:
         chunks.append(content[:split_at])
         content = content[split_at:].lstrip()
     return chunks
+
+
+async def _get_channel(channel_id: str) -> dict | None:
+    """Fetch channel metadata (to detect threads)."""
+    return await _api_request("GET", f"/channels/{channel_id}")
+
+
+async def _create_thread(channel_id: str, message_id: str, name: str) -> dict | None:
+    """Create a public thread from a message."""
+    return await _api_request(
+        "POST",
+        f"/channels/{channel_id}/messages/{message_id}/threads",
+        json={"name": name[:100], "auto_archive_duration": 1440},
+    )
+
+
+async def _send_to_thread(thread_id: str, content: str):
+    """Send a message to a thread, splitting if it exceeds Discord's limit."""
+    for chunk in _split_message(content):
+        await _api_request("POST", f"/channels/{thread_id}/messages", json={"content": chunk})
+
+
+def _format_message(msg: dict) -> str:
+    """Format a Discord message into a readable context line."""
+    author_name = msg.get("author", {}).get("username", "unknown")
+    is_bot = msg.get("author", {}).get("bot", False)
+    text = msg.get("content", "")
+    for embed in msg.get("embeds", []):
+        if embed.get("url"):
+            text += f"\n{embed['url']}"
+        if embed.get("title"):
+            text += f"\n{embed['title']}"
+        if embed.get("description"):
+            text += f"\n{embed['description'][:500]}"
+    for att in msg.get("attachments", []):
+        if att.get("url"):
+            text += f"\n[attachment: {att.get('filename', 'file')}] {att['url']}"
+    if not text.strip():
+        return ""
+    prefix = "Quinn" if is_bot else f"@{author_name}"
+    return f"{prefix}: {text.strip()}"
+
+
+async def _get_thread_context(channel_id: str, before_message_id: str, limit: int = 15) -> str:
+    """Fetch the thread starter (OP) + recent messages for conversation context.
+
+    In Discord, a thread's starter message has the same ID as the thread itself.
+    """
+    lines = []
+
+    # 1. Fetch the thread starter message (OP)
+    starter = await _get_message(channel_id, channel_id)
+    if starter:
+        formatted = _format_message(starter)
+        if formatted:
+            lines.append(f"[thread OP] {formatted}")
+
+    # 2. Fetch recent messages in the thread (before the triggering message)
+    data = await _api_request(
+        "GET", f"/channels/{channel_id}/messages?before={before_message_id}&limit={limit}"
+    )
+    if data and isinstance(data, list):
+        for msg in reversed(data):
+            if msg.get("id") == channel_id:
+                continue
+            formatted = _format_message(msg)
+            if formatted:
+                lines.append(formatted)
+
+    return "\n".join(lines)
+
+
+def _user_is_admin(member_data: dict) -> bool:
+    """Check if a guild member has admin roles or ADMINISTRATOR permission."""
+    # Check explicit admin role IDs
+    if _ADMIN_ROLE_IDS:
+        user_roles = set(member_data.get("roles", []))
+        if user_roles & _ADMIN_ROLE_IDS:
+            return True
+        return False
+    # If no admin roles configured, check Discord permissions
+    permissions = int(member_data.get("permissions", 0))
+    return bool(permissions & 0x8)  # ADMINISTRATOR bit
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +548,14 @@ async def _handle_reaction(data: dict, bot_id: str):
 
 
 async def _handle_mention(data: dict, bot_id: str):
-    """Handle @mention -- send content to the agent and reply."""
+    """Handle @mention — admin-only, creates a thread for the conversation.
+
+    Flow:
+    1. Check if user is an admin (role-based or ADMINISTRATOR permission)
+    2. Gather full context: surrounding messages, thread OP, replied-to message
+    3. Create a thread on the triggering message
+    4. Send the response in the thread
+    """
     author = data.get("author", {})
     if author.get("id") == bot_id or author.get("bot"):
         return
@@ -475,21 +569,66 @@ async def _handle_mention(data: dict, bot_id: str):
     if not any(m.get("id") == bot_id for m in mentions):
         return
 
-    clean_content = re.sub(r"<@!?" + bot_id + r">", "", content).strip()
-    log.info("Mention from %s in channel=%s", username, channel_id)
+    # Admin gate: check guild member roles
+    member = data.get("member", {})
+    if _ADMIN_ROLE_IDS and not _user_is_admin(member):
+        await _api_request(
+            "PUT",
+            f"/channels/{channel_id}/messages/{message_id}/reactions/%F0%9F%94%92/@me",
+        )  # lock emoji — signals "admin only"
+        return
 
-    # If this is a reply, pull in the referenced message for context
+    clean_content = re.sub(r"<@!?" + bot_id + r">", "", content).strip()
+    log.info("Admin mention from %s in channel=%s", username, channel_id)
+
+    # React with eyes to acknowledge we've seen the message
+    await _api_request(
+        "PUT",
+        f"/channels/{channel_id}/messages/{message_id}/reactions/%F0%9F%91%80/@me",
+    )
+
+    # Gather context from multiple sources
+    context_parts = []
+
+    # 1. Detect channel type (thread vs regular channel)
+    channel_info = await _get_channel(channel_id)
+    is_thread = channel_info and channel_info.get("type") in (11, 12)
+
+    if is_thread:
+        # Already in a thread: fetch OP + thread history
+        thread_context = await _get_thread_context(channel_id, message_id)
+        if thread_context:
+            context_parts.append(f"--- Thread conversation ---\n{thread_context}")
+            log.info("  Loaded thread context (%d chars)", len(thread_context))
+    else:
+        # Regular channel: fetch surrounding messages for context
+        recent = await _api_request(
+            "GET", f"/channels/{channel_id}/messages?before={message_id}&limit=5"
+        )
+        if recent and isinstance(recent, list):
+            lines = [_format_message(m) for m in reversed(recent)]
+            lines = [ln for ln in lines if ln]
+            if lines:
+                context_parts.append(
+                    f"--- Recent channel messages ---\n" + "\n\n".join(lines)
+                )
+                log.info("  Loaded channel context (%d messages)", len(lines))
+
+    # 2. If this is a reply, fetch the referenced message
     ref = data.get("message_reference")
-    context_content = ""
     if ref and ref.get("message_id"):
         ref_msg = await _get_message(channel_id, ref["message_id"])
         if ref_msg:
-            context_content = ref_msg.get("content", "")
+            ref_content = ref_msg.get("content", "")
             for embed in ref_msg.get("embeds", []):
                 if embed.get("url"):
-                    context_content += f"\n{embed['url']}"
+                    ref_content += f"\n{embed['url']}"
                 if embed.get("description"):
-                    context_content += f"\n{embed['description'][:500]}"
+                    ref_content += f"\n{embed['description'][:500]}"
+            if ref_content.strip():
+                context_parts.append(f"--- Replied-to message ---\n{ref_content.strip()}")
+
+    context_content = "\n\n".join(context_parts)
 
     if not clean_content and not context_content:
         await _reply(
@@ -502,12 +641,12 @@ async def _handle_mention(data: dict, bot_id: str):
         )
         return
 
-    # Build agent prompt with Discord formatting instructions
+    # Build agent prompt with full context
     prompt_parts = []
     if context_content:
-        prompt_parts.append(f"Context from a referenced Discord message:\n{context_content}")
+        prompt_parts.append(context_content)
     if clean_content:
-        prompt_parts.append(f"User ({username}) asks:\n{clean_content}")
+        prompt_parts.append(f"--- User's question ({username}) ---\n{clean_content}")
 
     prompt_parts.append(
         "\nIMPORTANT FORMATTING RULES (this will be posted to Discord):\n"
@@ -519,8 +658,9 @@ async def _handle_mention(data: dict, bot_id: str):
     )
 
     prompt = "\n\n".join(prompt_parts)
-    session_id = f"discord-mention-{channel_id}-{message_id}"
+    session_id = f"discord-{channel_id}-{message_id}"
 
+    # Show typing indicator while the agent works
     typing_task = asyncio.create_task(_keep_typing(channel_id))
     try:
         result = await _ask_agent(prompt, session_id)
@@ -531,7 +671,28 @@ async def _handle_mention(data: dict, bot_id: str):
         await _reply(channel_id, message_id, "I couldn't generate a response. Please try again.")
         return
 
-    await _reply(channel_id, message_id, result)
+    # If already in a thread, reply directly. Otherwise, create a thread.
+    if is_thread:
+        await _send_to_thread(channel_id, result)
+    else:
+        # Create a thread on the original message
+        first_line = clean_content[:60] if clean_content else "Quinn QA"
+        thread = await _create_thread(channel_id, message_id, f"Quinn: {first_line}")
+        if thread:
+            await _send_to_thread(thread["id"], result)
+        else:
+            # Fallback: reply inline if thread creation fails
+            await _reply(channel_id, message_id, result)
+
+    # Replace eyes with checkmark to signal completion
+    await _api_request(
+        "DELETE",
+        f"/channels/{channel_id}/messages/{message_id}/reactions/%F0%9F%91%80/@me",
+    )
+    await _api_request(
+        "PUT",
+        f"/channels/{channel_id}/messages/{message_id}/reactions/%E2%9C%85/@me",
+    )
 
 
 async def _handle_message(data: dict, bot_id: str):
