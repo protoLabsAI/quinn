@@ -659,25 +659,56 @@ def _main():
         return {"response": "\n\n".join(parts), "messages": result}
 
     # OpenAI-compatible chat completions endpoint
-    # Allows Quinn to be registered as a model in LiteLLM gateway
+    # Allows Quinn to be registered as a model in LiteLLM gateway / OpenWebUI
+    from fastapi.responses import StreamingResponse
+
     @fastapi_app.post("/v1/chat/completions")
     async def _openai_chat_completions(req: dict):
         messages = req.get("messages", [])
-        # Extract the last user message as the prompt
         user_msgs = [m for m in messages if m.get("role") == "user"]
         if not user_msgs:
             return {"error": "No user message provided"}, 400
         prompt = user_msgs[-1].get("content", "")
         session_id = f"openai-compat-{int(time.time())}"
+        stream = req.get("stream", False)
 
         result = await chat(prompt, session_id)
         parts = [m["content"] for m in result if m.get("role") == "assistant" and m.get("content")]
         content = "\n\n".join(parts)
+        created = int(time.time())
+        completion_id = f"quinn-{session_id}"
+
+        if stream:
+            # SSE streaming format for OpenWebUI / streaming clients
+            async def _stream():
+                chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": "quinn",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": content},
+                        "finish_reason": None,
+                    }],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+                done_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": "quinn",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                }
+                yield f"data: {json.dumps(done_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(_stream(), media_type="text/event-stream")
 
         return {
-            "id": f"quinn-{session_id}",
+            "id": completion_id,
             "object": "chat.completion",
-            "created": int(time.time()),
+            "created": created,
             "model": "quinn",
             "choices": [{
                 "index": 0,
