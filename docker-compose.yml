@@ -84,7 +84,7 @@ networks:
     name: automaker-staging_default
   gateway:
     external: true
-    name: gateway_default
+    name: ai_default
 
 volumes:
   quinn-knowledge:
