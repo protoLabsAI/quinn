@@ -171,6 +171,51 @@ Quinn also responds to Discord slash commands in the protoLabs server:
 - `/quinn bugs` — Active bugs across apps
 - `/quinn release [version]` — Generate release notes
 
+## OpenAI-Compatible API
+
+Quinn exposes an OpenAI-compatible `/v1/chat/completions` endpoint, allowing any client that speaks the OpenAI protocol to interact with her directly.
+
+### Direct Access
+
+```bash
+curl http://localhost:7873/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "quinn",
+    "messages": [{"role": "user", "content": "Run a health check on all apps."}]
+  }'
+```
+
+### Via LiteLLM Gateway
+
+Quinn is registered in the protoLabs AI Gateway (LiteLLM proxy on port 4000). This lets you access Quinn alongside cloud models from a single endpoint.
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "quinn", "messages": [{"role": "user", "content": "QA report."}]}'
+```
+
+**Gateway config** (`gateway/config.yaml`):
+
+```yaml
+- model_name: quinn
+  litellm_params:
+    model: openai/quinn
+    api_base: http://quinn:7870/v1
+    api_key: quinn-internal
+```
+
+Quinn joins the `gateway_default` Docker network so the proxy resolves `quinn:7870` by container name.
+
+### Model Discovery
+
+```bash
+curl http://localhost:7873/v1/models
+# {"object": "list", "data": [{"id": "quinn", ...}]}
+```
+
 ## Chat Commands
 
 | Command              | Description                                |
