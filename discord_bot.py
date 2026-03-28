@@ -944,8 +944,16 @@ async def post_daily_digest(channel_id: str | None = None):
 # ---------------------------------------------------------------------------
 
 
+_digest_scheduler_running = False
+
+
 async def _daily_digest_scheduler():
     """Run post_daily_digest() once per day at DIGEST_HOUR_UTC."""
+    global _digest_scheduler_running
+    if _digest_scheduler_running:
+        log.debug("Daily digest scheduler already running -- skipping duplicate")
+        return
+    _digest_scheduler_running = True
     while True:
         now = datetime.now(timezone.utc)
         target = now.replace(hour=_DIGEST_HOUR, minute=0, second=0, microsecond=0)
