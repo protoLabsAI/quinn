@@ -76,11 +76,15 @@ services:
     networks:
       - default
       - automaker
+      - gateway
 
 networks:
   automaker:
     external: true
     name: automaker-staging_default
+  gateway:
+    external: true
+    name: gateway_default
 
 volumes:
   quinn-knowledge:
