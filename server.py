@@ -658,6 +658,48 @@ def _main():
         parts = [m["content"] for m in result if m.get("role") == "assistant" and m.get("content")]
         return {"response": "\n\n".join(parts), "messages": result}
 
+    # OpenAI-compatible chat completions endpoint
+    # Allows Quinn to be registered as a model in LiteLLM gateway
+    @fastapi_app.post("/v1/chat/completions")
+    async def _openai_chat_completions(req: dict):
+        messages = req.get("messages", [])
+        # Extract the last user message as the prompt
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        if not user_msgs:
+            return {"error": "No user message provided"}, 400
+        prompt = user_msgs[-1].get("content", "")
+        session_id = f"openai-compat-{int(time.time())}"
+
+        result = await chat(prompt, session_id)
+        parts = [m["content"] for m in result if m.get("role") == "assistant" and m.get("content")]
+        content = "\n\n".join(parts)
+
+        return {
+            "id": f"quinn-{session_id}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": "quinn",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+
+    # OpenAI-compatible models endpoint
+    @fastapi_app.get("/v1/models")
+    async def _openai_models():
+        return {
+            "object": "list",
+            "data": [{
+                "id": "quinn",
+                "object": "model",
+                "created": 1774600000,
+                "owned_by": "protolabs",
+            }],
+        }
+
     # Prometheus /metrics endpoint
     if metrics.is_enabled():
         try:
