@@ -54,7 +54,7 @@ services:
       - HOME=/home/sandbox
       # These are populated by infisical run on the host
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - OPENAI_API_KEY=quinn-internal
+      - OPENAI_API_KEY=${LITELLM_MASTER_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - DISCORD_BOT_QUINN=${DISCORD_BOT_QUINN:-}
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_QUINN:-}

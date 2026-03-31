@@ -17,10 +17,10 @@ class SubagentDef:
 @dataclass
 class LangGraphConfig:
     # Model settings
-    model_provider: str = "cliproxy"  # cliproxy or vllm
+    model_provider: str = "openai"  # openai (gateway) or vllm
     model_name: str = "claude-sonnet-4-6"
-    api_base: str = "http://127.0.0.1:8317/v1"
-    api_key: str = "quinn-internal"
+    api_base: str = "http://gateway:4000/v1"
+    api_key: str = ""  # set via OPENAI_API_KEY env (gateway master key)
     temperature: float = 0.3
     max_tokens: int = 4096
     max_iterations: int = 75
