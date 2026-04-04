@@ -233,8 +233,8 @@ async def _handle_status_command() -> list[dict[str, Any]]:
         lines.append("\n**Recent Reports:**")
         for r in recent:
             lines.append(
-                f"- [{r['verdict']}] {r['app_name']} {r.get('version', '')} "
-                f"({r.get('scope', '')}) -- {r.get('created_at', '')[:10]}"
+                f"- [{r.get('severity', '?').upper()}] {r.get('app_name', '?')} — "
+                f"{r.get('title', '')[:60]} ({r.get('created_at', '')[:10]})"
             )
 
     return _msg("\n".join(lines))
@@ -266,8 +266,8 @@ async def _handle_report_command(session_id: str) -> list[dict[str, Any]]:
         lines.append("**Recent QA Reports:**")
         for r in reports[:5]:
             lines.append(
-                f"- [{r['verdict']}] {r['app_name']} {r.get('version', '')} "
-                f"({r.get('checks_passed', 0)}/{r.get('checks_total', 0)} checks)"
+                f"- [{r.get('severity', '?').upper()}] {r.get('app_name', '?')} — "
+                f"{r.get('title', '')[:60]} ({r.get('created_at', '')[:10]})"
             )
         lines.append("")
 
@@ -287,10 +287,10 @@ async def _handle_report_command(session_id: str) -> list[dict[str, Any]]:
 
     # Store as a report
     store.add_report(
+        title=f"QA Daily Digest — {date_str}",
+        summary=digest_content[:500],
         app_name="all",
-        content=digest_content,
-        verdict="INFO",
-        scope="digest",
+        severity="info",
     )
 
     if not webhook_url:
