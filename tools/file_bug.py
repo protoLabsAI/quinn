@@ -81,19 +81,20 @@ class FileBugTool(Tool):
             full_description += f"\n\n---\n**Source:** {source}"
 
         body: dict[str, Any] = {
-            "title": title,
-            "description": full_description,
-            "status": "backlog",
-            "category": "bug",
-            "metadata": {"severity": severity},
+            "projectPath": project_path,
+            "feature": {
+                "title": title,
+                "description": full_description,
+                "status": "backlog",
+                "category": "bug",
+                "metadata": {"severity": severity},
+            },
         }
-        if project_path:
-            body["projectPath"] = project_path
 
         try:
             async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
                 resp = await client.post(
-                    f"{server_url}/api/features",
+                    f"{server_url}/api/features/create",
                     json=body,
                     headers={
                         "Content-Type": "application/json",
@@ -103,8 +104,9 @@ class FileBugTool(Tool):
                 resp.raise_for_status()
                 data = resp.json()
 
-            feature_id = data.get("id", data.get("featureId", "unknown"))
-            feature_title = data.get("title", title)
+            feature = data.get("feature", data)
+            feature_id = feature.get("id", data.get("featureId", "unknown"))
+            feature_title = feature.get("title", title)
             return (
                 f"Bug filed: **{feature_title}** → `{feature_id}` "
                 f"(severity={severity}, status=backlog)\n"

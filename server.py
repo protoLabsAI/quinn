@@ -490,11 +490,11 @@ def _build_settings_callbacks() -> dict:
         detected = _detect_vllm_model("http://host.docker.internal:8000/v1")
         if detected:
             choices.append(f"local: {detected}")
-        # Claude models via CLIProxyAPI (OAuth)
+        # Claude models via LiteLLM gateway
         choices.extend([
-            "claude: claude-sonnet-4-6",
-            "claude: claude-haiku-4-5",
-            "claude: claude-opus-4-6",
+            "gateway: claude-sonnet-4-6",
+            "gateway: claude-haiku-4-5",
+            "gateway: claude-opus-4-6",
         ])
         return choices
 
@@ -527,8 +527,8 @@ def _build_settings_callbacks() -> dict:
                 _graph_config.model_provider = "vllm"
                 detected = _detect_vllm_model("http://host.docker.internal:8000/v1")
                 _graph_config.model_name = detected or model_name
-            elif provider_type == "claude":
-                _graph_config.model_provider = "cliproxy"
+            elif provider_type == "gateway":
+                _graph_config.model_provider = "openai"
                 _graph_config.model_name = model_name
             else:
                 return f"**Error:** Unknown provider: {provider_type}"

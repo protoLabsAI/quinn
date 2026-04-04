@@ -2,7 +2,7 @@
 
 model:
   provider: openai
-  name: claude-sonnet-4-6
+  name: protolabs/quinn
   api_base: http://gateway:4000/v1
   api_key: ""  # falls back to OPENAI_API_KEY env (= LITELLM_MASTER_KEY from Infisical)
   temperature: 0.2

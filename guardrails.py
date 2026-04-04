@@ -9,6 +9,7 @@ Patterns adopted from production-agentic-rag-course:
 
 import hashlib
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -42,7 +43,7 @@ Respond with ONLY a JSON object like this example: {{"score": 25, "reason": "bri
 Query: {query}"""
 
 
-async def check_guardrail(query: str, llm_url: str = "http://127.0.0.1:8317/v1", threshold: int = 60) -> dict:
+async def check_guardrail(query: str, llm_url: str = "http://gateway:4000/v1", threshold: int = 60) -> dict:
     """Check if a query is within QA/DevOps scope.
 
     Returns: {"pass": bool, "score": int, "reason": str}
@@ -68,7 +69,7 @@ async def check_guardrail(query: str, llm_url: str = "http://127.0.0.1:8317/v1",
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{llm_url}/chat/completions",
-                headers={"Authorization": "Bearer quinn-internal"},
+                headers={"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}"},
                 json={
                     "model": "claude-sonnet-4-6",
                     "messages": [{"role": "user", "content": _GUARDRAIL_PROMPT.format(query=query)}],
@@ -180,7 +181,7 @@ Document excerpt (first 500 chars):
 {excerpt}"""
 
 
-async def grade_document(query: str, content: str, llm_url: str = "http://127.0.0.1:8317/v1") -> bool:
+async def grade_document(query: str, content: str, llm_url: str = "http://gateway:4000/v1") -> bool:
     """Quick binary relevance check. Returns True if relevant."""
     if not content or len(content.strip()) < 50:
         return False  # Too short to be useful
@@ -191,7 +192,7 @@ async def grade_document(query: str, content: str, llm_url: str = "http://127.0.
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 f"{llm_url}/chat/completions",
-                headers={"Authorization": "Bearer quinn-internal"},
+                headers={"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}"},
                 json={
                     "model": "claude-sonnet-4-6",
                     "messages": [{"role": "user", "content": _GRADE_PROMPT.format(query=query, excerpt=excerpt)}],
@@ -218,13 +219,13 @@ Original query: {query}
 Respond with ONLY the rewritten query (no explanation)."""
 
 
-async def rewrite_query(query: str, llm_url: str = "http://127.0.0.1:8317/v1") -> str:
+async def rewrite_query(query: str, llm_url: str = "http://gateway:4000/v1") -> str:
     """Rewrite a query for better search results."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 f"{llm_url}/chat/completions",
-                headers={"Authorization": "Bearer quinn-internal"},
+                headers={"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}"},
                 json={
                     "model": "claude-sonnet-4-6",
                     "messages": [{"role": "user", "content": _REWRITE_PROMPT.format(query=query)}],

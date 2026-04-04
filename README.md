@@ -7,7 +7,7 @@ Quinn monitors the board across all apps in your portfolio, triages bugs, verifi
 ## What Quinn Does
 
 - **Board Monitoring** — Scans blocked features, stale PRs, review queue saturation across all configured apps
-- **Bug Triage** — Classifies GitHub issues as fixed/actionable/stale/duplicate, closes stale ones with evidence
+- **Bug Triage** — Classifies Discord/GitHub bug reports, files them on the Ava board via `file_bug`
 - **PR Verification** — Checks CI status, CodeRabbit threads, auto-merge readiness
 - **Release QA** — Runs verification playbooks: typecheck, wiring, endpoint contracts, visual QA
 - **Release Notes** — Generates changelogs from git history, merged PRs, and board state
@@ -16,22 +16,26 @@ Quinn monitors the board across all apps in your portfolio, triages bugs, verifi
 ## Architecture
 
 ```
-User / Cron
-    |
-    v
-Quinn (LangGraph Agent)
-  |-- Auditor subagent (board_monitor, pr_inspector, github_issues)
+Discord / GitHub / A2A
+        |
+        v
+Quinn (LangGraph Agent)  ← model: protolabs/quinn (Opus via LiteLLM gateway)
+  |-- Auditor subagent  (board_monitor, pr_inspector, github_issues, github_actions)
   |-- Verifier subagent (qa_memory, browser)
-  |-- Reporter subagent (qa_memory, discord_feed, release_notes)
-    |
-    v
-protoLabs Studio API (HTTP) + GitHub CLI + Discord Webhooks
+  |-- Reporter subagent (qa_memory, discord_feed, release_notes, file_bug)
+        |
+        v
+LiteLLM Gateway (http://gateway:4000)
+protoLabs Studio API (Ava board)
+GitHub CLI
+Discord Webhooks
 ```
 
-**LLM**: Claude Sonnet 4.6 via CLIProxyAPI (Claude Code OAuth)
-**UI**: Gradio chat interface
-**Knowledge**: SQLite + sqlite-vec (QA reports, bug patterns, release history)
-**Observability**: Langfuse tracing, JSONL audit logs
+**LLM**: `protolabs/quinn` alias in LiteLLM gateway → `claude-opus-4-6` by default. Swap the model by updating the alias in `stacks/ai/config/litellm/config.yaml` — no Quinn changes needed.
+
+**UI**: Gradio chat interface + A2A endpoint  
+**Knowledge**: SQLite + sqlite-vec (QA reports, bug patterns, release history)  
+**Observability**: Langfuse tracing, JSONL audit logs, Prometheus metrics
 
 ## Quick Start
 
@@ -39,8 +43,8 @@ protoLabs Studio API (HTTP) + GitHub CLI + Discord Webhooks
 
 - Docker and Docker Compose
 - [Infisical CLI](https://infisical.com/docs/cli/overview) installed and logged in to `secrets.proto-labs.ai`
-- Claude Code authenticated (`claude` CLI logged in)
-- protoLabs Studio server running (default: localhost:3008)
+- LiteLLM gateway running (`stacks/ai`) with `protolabs/quinn` alias configured
+- protoLabs Studio server (Ava) running (default: `http://automaker-server:3008`)
 
 ### 1. Clone and configure
 
@@ -54,150 +58,56 @@ infisical login --domain https://secrets.proto-labs.ai
 # Edit config/qa-config.json with your apps
 ```
 
-### 2. Run (one-liner)
+### 2. Run
 
 ```bash
-INFISICAL_API_URL=https://secrets.proto-labs.ai infisical run --env prod -- docker compose up --build
+infisical run --domain https://secrets.proto-labs.ai/api --env=prod -- docker compose up -d --build
 ```
-
-This pulls 24 secrets from Infisical, injects them as env vars, and starts Quinn. No `.env` files needed.
 
 Quinn's UI will be available at **http://localhost:7873**.
 
 ### 3. Auto-start on boot (systemd)
 
 ```bash
-# Install the service
 sudo cp quinn.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable quinn
 sudo systemctl start quinn
-
-# Check status
-sudo systemctl status quinn
-journalctl -u quinn -f
 ```
 
-### Secrets Management
+## Secrets (Infisical AI Project)
 
-All secrets are managed via [Infisical](https://secrets.proto-labs.ai). The `.infisical.json` in this repo points to the `secret-management` project.
+All secrets come from the **AI project** in Infisical (`secrets.proto-labs.ai`). The `.infisical.json` in this repo points to project `11e172e0-a1f6-41d5-9464-df72779a7063`.
 
-Key secrets used by Quinn:
+| Infisical Secret       | Container env var     | Purpose                               |
+| ---------------------- | --------------------- | ------------------------------------- |
+| `LITELLM_MASTER_KEY`   | `OPENAI_API_KEY`      | LiteLLM gateway auth (required)       |
+| `DISCORD_BOT_QUINN`    | `DISCORD_BOT_TOKEN`   | Discord bot for reading channels      |
+| `DISCORD_WEBHOOK_ALERTS` | `DISCORD_WEBHOOK_URL` | Discord webhook for publishing      |
+| `GITHUB_TOKEN`         | `GITHUB_TOKEN`        | GitHub issue/PR operations (optional) |
+| `LANGFUSE_PUBLIC_KEY`  | `LANGFUSE_PUBLIC_KEY` | Tracing (optional)                    |
+| `LANGFUSE_SECRET_KEY`  | `LANGFUSE_SECRET_KEY` | Tracing (optional)                    |
 
-| Secret (Infisical)    | Maps to               | Purpose                          |
-| --------------------- | --------------------- | -------------------------------- |
-| `DISCORD_BOT_QUINN`   | `DISCORD_BOT_TOKEN`   | Discord bot for reading channels |
-| `ANTHROPIC_API_KEY`   | `ANTHROPIC_API_KEY`   | Claude API access                |
-| `GITHUB_TOKEN`        | `GITHUB_TOKEN`        | GitHub issue/PR operations       |
-| `DISCORD_WEBHOOK_URL` | `DISCORD_WEBHOOK_URL` | Discord webhook for publishing   |
+> **`GITHUB_TOKEN` setup**: Create a fine-grained PAT scoped to `protoLabsAI/protoMaker` with Contents (Read), Issues (R/W), Pull Requests (R/W), Actions (R/W), Metadata (Read). Add to the AI Infisical project as `GITHUB_TOKEN`.
 
-The `DISCORD_BOT_QUINN` to `DISCORD_BOT_TOKEN` mapping happens automatically in the entrypoint.
+The entrypoint automatically maps `DISCORD_BOT_QUINN` → `DISCORD_BOT_TOKEN`.
 
-### Manual fallback (no Infisical)
+## LiteLLM Gateway Setup
 
-If Infisical is not available, pass env vars directly:
+Quinn routes all LLM calls through the protoLabs AI gateway. Two things must be configured there:
 
-```bash
-DISCORD_BOT_TOKEN=xxx ANTHROPIC_API_KEY=xxx GITHUB_TOKEN=xxx docker compose up --build
+### 1. Model alias (`stacks/ai/config/litellm/config.yaml`)
+
+```yaml
+- model_name: protolabs/quinn
+  litellm_params:
+    model: anthropic/claude-opus-4-6
+    api_key: os.environ/ANTHROPIC_API_KEY
 ```
 
-## API — Trigger Quinn from Other Agents
+To swap Quinn's model, update this alias and reload the gateway — no changes needed in Quinn.
 
-Quinn exposes an HTTP API at `http://localhost:7873/api/chat`. Any agent, script, or cron can trigger Quinn's QA capabilities.
-
-### Endpoint
-
-```
-POST http://localhost:7873/api/chat
-Content-Type: application/json
-
-{"message": "<command or natural language>"}
-```
-
-### Response
-
-```json
-{
-  "response": "Markdown-formatted response text",
-  "messages": [{ "role": "assistant", "content": "..." }]
-}
-```
-
-### Examples
-
-```bash
-# Quick status check
-curl -s http://localhost:7873/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "/status"}'
-
-# Full board audit
-curl -s http://localhost:7873/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "/audit"}'
-
-# Triage GitHub issues
-curl -s http://localhost:7873/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "/triage"}'
-
-# Generate release notes
-curl -s http://localhost:7873/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "/release v0.90.1"}'
-
-# Natural language works too
-curl -s http://localhost:7873/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Check if there are any failing PRs on protoMaker"}'
-```
-
-### Calling from Ava or Other Agents
-
-From any protoLabs agent with shell access:
-
-```bash
-# In a Claude Code agent prompt or script
-QUINN_RESPONSE=$(curl -s http://localhost:7873/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "/audit"}' | jq -r '.response')
-```
-
-### Discord Slash Commands
-
-Quinn also responds to Discord slash commands in the protoLabs server:
-
-- `/quinn status` — Quick health check
-- `/quinn bugs` — Active bugs across apps
-- `/quinn release [version]` — Generate release notes
-
-## OpenAI-Compatible API
-
-Quinn exposes an OpenAI-compatible `/v1/chat/completions` endpoint, allowing any client that speaks the OpenAI protocol to interact with her directly.
-
-### Direct Access
-
-```bash
-curl http://localhost:7873/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "quinn",
-    "messages": [{"role": "user", "content": "Run a health check on all apps."}]
-  }'
-```
-
-### Via LiteLLM Gateway
-
-Quinn is registered in the protoLabs AI Gateway (LiteLLM proxy on port 4000). This lets you access Quinn alongside cloud models from a single endpoint.
-
-```bash
-curl http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "quinn", "messages": [{"role": "user", "content": "QA report."}]}'
-```
-
-**Gateway config** (`gateway/config.yaml`):
+### 2. Agent entry (for calling Quinn via the gateway)
 
 ```yaml
 - model_name: quinn
@@ -207,48 +117,93 @@ curl http://localhost:4000/v1/chat/completions \
     api_key: quinn-internal
 ```
 
-Quinn joins the `gateway_default` Docker network so the proxy resolves `quinn:7870` by container name.
+Quinn joins the `ai_default` and `automaker-staging_default` Docker networks so the gateway can reach it at `quinn:7870`.
 
-### Model Discovery
+## A2A Protocol
+
+Quinn implements the [Google A2A protocol](https://github.com/google/A2A) for agent-to-agent communication.
+
+### Agent card
 
 ```bash
-curl http://localhost:7873/v1/models
-# {"object": "list", "data": [{"id": "quinn", ...}]}
+curl http://localhost:7873/.well-known/agent.json
+```
+
+### Send a message (JSON-RPC 2.0)
+
+```bash
+curl http://localhost:7873/a2a \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "message/send",
+    "params": {
+      "message": {
+        "role": "user",
+        "parts": [{"kind": "text", "text": "triage this bug and file it: button crash in Safari"}]
+      }
+    }
+  }'
+```
+
+Quinn has 4 A2A skills: `qa_report`, `board_audit`, `bug_triage`, `pr_review`.
+
+### Register in LiteLLM Agent Hub (Phase 3)
+
+Once registered at `ai.proto-labs.ai/ui`, other agents can call Quinn via:
+
+```python
+response = client.chat.completions.create(
+    model="a2a/quinn",
+    messages=[{"role": "user", "content": "Run a QA audit."}]
+)
+```
+
+## API
+
+### Chat endpoint
+
+```
+POST http://localhost:7873/api/chat
+{"message": "<command or natural language>", "session_id": "optional"}
+```
+
+### OpenAI-compatible
+
+```bash
+curl http://localhost:7873/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "quinn", "messages": [{"role": "user", "content": "/report"}]}'
 ```
 
 ## Chat Commands
 
-| Command              | Description                                |
-| -------------------- | ------------------------------------------ |
-| `/audit`             | Full board scan across all configured apps |
-| `/qa [version]`      | Run QA playbook for a specific version     |
-| `/triage`            | Triage open GitHub issues                  |
-| `/release [version]` | Generate release notes                     |
-| `/bugs`              | Show active bug reports across apps        |
-| `/status`            | Quick health check                         |
-| `/help`              | Show available commands                    |
+| Command              | Description                                        |
+| -------------------- | -------------------------------------------------- |
+| `/report`            | Generate QA digest and publish to Discord          |
+| `/audit`             | Full board scan across all configured apps         |
+| `/qa [version]`      | Run QA playbook for a specific version             |
+| `/triage`            | Triage open GitHub issues                          |
+| `/release [version]` | Generate release notes                             |
+| `/bugs`              | Show active bug reports across apps                |
+| `/status`            | Quick health check                                 |
 
-## QA Playbooks
+## E2E Smoke Test
 
-### Release QA
+Validates the full Discord → Quinn → Ava pipeline:
 
-Scope changes, typecheck, wiring check, API contracts, board state. Ends with PASS/WARN/FAIL verdict.
+```bash
+python tests/test_e2e_smoke.py
+# or against specific hosts:
+python tests/test_e2e_smoke.py --quinn http://ava:7873 --ava http://ava:3008
+```
 
-### Bug Triage
-
-Scan board + GitHub issues, cross-reference with recent commits, classify and close stale issues.
-
-### PR Review
-
-Check CI, CodeRabbit threads, auto-merge status. Flag PRs needing attention.
-
-### Release Notes
-
-Git log between tags + merged PRs + done features. Categorize, format, publish to Discord.
+Tests: agent card discovery, A2A `/report`, bug triage → `file_bug` → Ava board, board verification.
 
 ## Multi-App Support
 
-Quinn monitors multiple apps in your protoLabs Studio portfolio. Configure in `config/qa-config.json`:
+Configure in `config/qa-config.json`:
 
 ```json
 {

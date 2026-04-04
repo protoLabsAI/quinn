@@ -97,7 +97,7 @@ Rules:
 - Keep it concise — respect the reader's time
 - Publish via discord_feed action=publish (uses webhook, no channel_id needed)
 """,
-    tools=["qa_memory", "discord_feed", "release_notes"],
+    tools=["qa_memory", "discord_feed", "release_notes", "file_bug"],
     max_turns=20,
 )
 

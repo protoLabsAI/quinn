@@ -403,7 +403,7 @@ async def _register_slash_commands(application_id: str):
 async def _ask_agent(prompt: str, session_id: str, retries: int = 2) -> str:
     """Send a prompt to Quinn's LangGraph agent and return the response text.
 
-    Retries on 401/502 (CLIProxyAPI token refresh) with exponential backoff.
+    Retries on 401/502 with exponential backoff.
     Returns empty string on persistent failure so callers can distinguish
     errors from real responses.
     """

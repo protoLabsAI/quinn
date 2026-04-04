@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS bug_patterns (
     title TEXT NOT NULL,
     description TEXT NOT NULL,
     category TEXT,
-    frequency INTEGER DEFAULT 1,
+    occurrences INTEGER DEFAULT 1,
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
     related_features TEXT,
@@ -205,7 +205,7 @@ class QAKnowledgeStore:
         now = self._now_iso()
         cursor = db.execute(
             """INSERT INTO bug_patterns
-               (title, description, category, frequency, first_seen, last_seen,
+               (title, description, category, occurrences, first_seen, last_seen,
                 related_features, resolution)
                VALUES (?, ?, ?, 1, ?, ?, ?, ?)""",
             (
@@ -600,7 +600,7 @@ class QAMemoryTool(Tool):
             lines.append(f"- #{entry_id}: {name}")
 
             if entry_type == "bug_pattern":
-                freq = entry.get("frequency", 0)
+                freq = entry.get("occurrences", 0)
                 resolved = "resolved" if entry.get("is_resolved") else "open"
                 lines.append(f"  Frequency: {freq} | Status: {resolved}")
             elif entry_type == "qa_report":
