@@ -642,6 +642,7 @@ def _main():
 
     static_dir = Path(__file__).parent / "static"
 
+    from fastapi import Request
     fastapi_app = FastAPI(title="Quinn QA -- protoLabs")
 
     # Chat API endpoint (for evals and programmatic access)
@@ -730,6 +731,131 @@ def _main():
                 "owned_by": "protolabs",
             }],
         }
+
+    # ---------------------------------------------------------------------------
+    # A2A — Google Agent2Agent protocol
+    # GET  /.well-known/agent.json   — agent card (unauthenticated)
+    # POST /a2a                      — message/send handler (no auth — open for now)
+    # ---------------------------------------------------------------------------
+    import uuid as _uuid
+    from fastapi.responses import JSONResponse as _JSONResponse
+
+    def _build_agent_card(host: str) -> dict:
+        return {
+            "name": "quinn",
+            "description": (
+                "protoLabs.studio QA Engineer. Audits board health, inspects PRs, "
+                "triages bugs from Discord and GitHub, generates QA reports, "
+                "and files confirmed bugs on the Ava board."
+            ),
+            "url": f"http://{host}",
+            "version": "1.0.0",
+            "provider": {
+                "organization": "protoLabsAI",
+                "url": "https://github.com/protoLabsAI",
+            },
+            "capabilities": {
+                "streaming": False,
+                "pushNotifications": False,
+                "stateTransitionHistory": False,
+            },
+            "defaultInputModes": ["text/plain"],
+            "defaultOutputModes": ["text/markdown"],
+            "skills": [
+                {
+                    "id": "qa_report",
+                    "name": "QA Report",
+                    "description": "Generate a QA digest: board health, recent reports, active bugs.",
+                    "tags": ["qa", "monitoring"],
+                    "examples": ["/report", "run a qa report", "what's the qa status?"],
+                },
+                {
+                    "id": "board_audit",
+                    "name": "Board Audit",
+                    "description": "Audit protoLabs Studio board: blocked features, stalled PRs, CI failures.",
+                    "tags": ["qa", "board"],
+                    "examples": ["audit the board", "what's blocked?", "check board health"],
+                },
+                {
+                    "id": "bug_triage",
+                    "name": "Bug Triage",
+                    "description": "Triage a bug report and file it on the Ava board with severity classification.",
+                    "tags": ["bugs", "triage"],
+                    "examples": ["triage this bug: ...", "file a bug for issue #42"],
+                },
+                {
+                    "id": "pr_review",
+                    "name": "PR Review",
+                    "description": "Inspect open PRs: CI status, unresolved review threads, diff summary.",
+                    "tags": ["qa", "github"],
+                    "examples": ["review open PRs", "check CI on PR #123"],
+                },
+            ],
+            "securitySchemes": {
+                "apiKey": {"type": "apiKey", "in": "header", "name": "X-API-Key"}
+            },
+            "security": [{"apiKey": []}],
+        }
+
+    @fastapi_app.get("/.well-known/agent.json", include_in_schema=False)
+    @fastapi_app.get("/.well-known/agent-card.json", include_in_schema=False)
+    async def _a2a_agent_card(request: Request):
+        host = request.headers.get("host", "quinn:7870")
+        return _JSONResponse(
+            content=_build_agent_card(host),
+            headers={"Cache-Control": "public, max-age=60"},
+        )
+
+    @fastapi_app.post("/a2a", include_in_schema=False)
+    async def _a2a_handler(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            return _JSONResponse(status_code=400, content={
+                "jsonrpc": "2.0", "id": None,
+                "error": {"code": -32700, "message": "Parse error"},
+            })
+
+        rpc_id = body.get("id")
+        method = body.get("method")
+
+        if method != "message/send":
+            return _JSONResponse(content={
+                "jsonrpc": "2.0", "id": rpc_id,
+                "error": {"code": -32601, "message": f"Method not found: {method}. Supported: message/send"},
+            })
+
+        parts = body.get("params", {}).get("message", {}).get("parts", [])
+        user_text = "\n".join(
+            p.get("text", "") for p in parts if (p.get("kind") or p.get("type")) == "text"
+        ).strip()
+
+        if not user_text:
+            return _JSONResponse(content={
+                "jsonrpc": "2.0", "id": rpc_id,
+                "error": {"code": -32602, "message": "Invalid params: message must contain a text part"},
+            })
+
+        session_id = f"a2a-{_uuid.uuid4().hex[:8]}"
+        result = await chat(user_text, session_id)
+        response_text = "\n\n".join(
+            m["content"] for m in result if m.get("role") == "assistant" and m.get("content")
+        )
+
+        task_id = str(_uuid.uuid4())
+        return _JSONResponse(content={
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "id": task_id,
+                "contextId": str(_uuid.uuid4()),
+                "status": {"state": "completed"},
+                "artifacts": [{
+                    "artifactId": str(_uuid.uuid4()),
+                    "parts": [{"kind": "text", "text": response_text}],
+                }],
+            },
+        })
 
     # Prometheus /metrics endpoint
     if metrics.is_enabled():
