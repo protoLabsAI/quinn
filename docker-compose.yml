@@ -49,8 +49,6 @@ services:
       # LiteLLM gateway (master key from Infisical AI project)
       - OPENAI_API_KEY=${LITELLM_MASTER_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
-      - DISCORD_BOT_QUINN=${DISCORD_BOT_QUINN:-}
-      - DISCORD_BOT_TOKEN=${DISCORD_BOT_QUINN:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_ALERTS:-}
       - DISCORD_GUILD_ID=${DISCORD_GUILD_ID:-1070606339363049492}
       # protoLabs Studio API (automaker-server on shared Docker network)

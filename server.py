@@ -618,10 +618,6 @@ def _main():
     # Seed default tracked apps
     _seed_apps()
 
-    # Start Discord bot (watches for reactions and @mentions)
-    from discord_bot import start_bot
-    start_bot()
-
     blocks = create_chat_app(
         chat_fn=chat,
         title="Quinn QA",
