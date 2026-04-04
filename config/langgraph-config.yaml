@@ -1,10 +1,10 @@
 # Quinn QA Engineer — LangGraph agent configuration
 
 model:
-  provider: cliproxy
+  provider: openai
   name: claude-sonnet-4-6
-  api_base: http://127.0.0.1:8317/v1
-  api_key: quinn-internal
+  api_base: http://gateway:4000/v1
+  api_key: ""  # falls back to OPENAI_API_KEY env (= LITELLM_MASTER_KEY from Infisical)
   temperature: 0.2
   max_tokens: 4096
   max_iterations: 75
@@ -20,7 +20,7 @@ subagents:
     max_turns: 30
   reporter:
     enabled: true
-    tools: [qa_memory, discord_feed, release_notes]
+    tools: [qa_memory, discord_feed, release_notes, file_bug]
     max_turns: 20
 
 middleware:

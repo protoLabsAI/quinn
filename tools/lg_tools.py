@@ -10,6 +10,7 @@ from tools.board_monitor import BoardMonitorTool
 from tools.browser import BrowserTool
 from tools.discord_admin import DiscordAdminTool
 from tools.discord_feed import DiscordFeedTool
+from tools.file_bug import FileBugTool
 from tools.github_actions import GitHubActionsTool
 from tools.github_issues import GitHubIssuesTool
 from tools.pr_inspector import PrInspectorTool
@@ -21,6 +22,7 @@ _board_monitor = BoardMonitorTool()
 _browser = BrowserTool()
 _discord_admin = DiscordAdminTool()
 _discord_feed = DiscordFeedTool()
+_file_bug = FileBugTool()
 _github_actions = GitHubActionsTool()
 _github_issues = GitHubIssuesTool()
 _pr_inspector = PrInspectorTool()
@@ -346,6 +348,27 @@ def create_qa_memory_tool(store=None):
 # Tool Registry
 # ---------------------------------------------------------------------------
 
+@tool
+async def file_bug(
+    title: str,
+    description: str,
+    severity: str = "medium",
+    source: str = "",
+) -> str:
+    """File a bug report on the protoLabs Studio board.
+
+    Use after triaging a Discord or GitHub bug report. Creates a backlog
+    feature with category=bug and returns the feature ID to link back to
+    the reporter.
+
+    severity: critical | high | medium | low
+    source: where it came from, e.g. 'Discord #bug-reports by @user' or 'GitHub issue #42'
+    """
+    return await _file_bug.execute(
+        title=title, description=description, severity=severity, source=source,
+    )
+
+
 def get_all_tools(qa_store=None):
     """Get all QA tools as LangChain tool objects."""
     return [
@@ -353,6 +376,7 @@ def get_all_tools(qa_store=None):
         browser,
         discord_admin,
         discord_feed,
+        file_bug,
         github_actions,
         github_issues,
         pr_inspector,
