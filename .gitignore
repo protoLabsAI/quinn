@@ -13,4 +13,6 @@ build/
 
 # Real config has secrets (channel IDs, paths) — use qa-config.example.json as template
 config/qa-config.json
+
+# protoLabs Studio agent workspace (never commit)
 .automaker/
