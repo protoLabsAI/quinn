@@ -13,3 +13,4 @@ build/
 
 # Real config has secrets (channel IDs, paths) — use qa-config.example.json as template
 config/qa-config.json
+.automaker/
