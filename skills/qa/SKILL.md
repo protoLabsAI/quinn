@@ -523,3 +523,66 @@ Always verify in this order:
 1. **Wiring** -- Is the service instantiated? Is it in `ServiceContainer`? Is the module registered in `wiring.ts`? Are routes mounted?
 2. **Contract** -- Do endpoints accept the documented request shape? Do they return the documented response shape? Do auth and error cases work?
 3. **Integration** -- Do the pieces work together? Does the UI hook call the right client method? Does the client hit the right endpoint? Does the event flow from emitter to subscriber?
+
+---
+
+## Security Triage Playbook
+
+Use this when the skill hint is `security_triage` or the incoming report is a CVE, dependabot alert, vulnerability disclosure, suspicious auth pattern, or permissions failure.
+
+### Step 1: Classify severity
+
+Map the finding to one of four buckets. **Do not invent a severity** — if the report cites a CVSS score, use it verbatim. If there's no score, infer conservatively and note your reasoning in the verdict.
+
+- **CRITICAL** — Remote code execution, auth bypass, pre-auth data exposure, secrets leak in production, active exploit observed. Any unpatched CVSS 9.0+.
+- **HIGH** — Post-auth privilege escalation, PII disclosure, SSRF, dependency with known exploit in the wild, CVSS 7.0–8.9.
+- **MEDIUM** — XSS requiring user interaction, denial-of-service, CSP bypass, information disclosure of non-sensitive data, CVSS 4.0–6.9.
+- **LOW** — Hardening gaps, deprecated primitives, low-impact misconfigurations, CVSS < 4.0.
+
+### Step 2: Identify the affected project
+
+The security incident must be routed to the right project so the fix lands in the right repo.
+
+```bash
+# From a dependabot alert — pull repo out of the URL
+echo "$ALERT_URL" | sed -n 's#.*github.com/\([^/]*/[^/]*\)/.*#\1#p'
+```
+
+Match the repo owner/name against `workspace/projects.yaml` (via workstacean's `/api/projects` endpoint if running) to get the canonical `projectSlug`. If no match, escalate — the incident is about a repo we don't own and needs human review.
+
+### Step 3: File the incident
+
+Use the workstacean `report_incident` MCP tool (or POST `/api/incidents` directly) so the finding is tracked as a structured incident and picked up by the GOAP security pipeline:
+
+```
+report_incident(
+  title: "<brief, specific, actionable>",
+  severity: "critical|high|medium|low",
+  description: "<full context: what, where, how observed, suggested fix if known>",
+  affectedProjects: ["<projectSlug>"],
+  projectSlug: "<projectSlug>",
+)
+```
+
+The pipeline will:
+1. Fire `alert.security.<severity>` on the bus (Discord alert to `#security`, prio 100 for critical)
+2. Open a HITL gate for CRITICAL and HIGH before any autonomous remediation
+3. Queue a `security_fix` feature on the affected project's board once HITL approves
+
+### Step 4: Verdict block
+
+End with the standard verdict format so the sender can parse the outcome. The severity line is required for security_triage.
+
+```
+---
+VERDICT: [PASS|WARN|FAIL]
+Severity: [CRITICAL|HIGH|MEDIUM|LOW]
+Project: [projectSlug]
+Incident: [incident id or "escalated to HITL"]
+Notes: [one-line summary of what was filed and why]
+---
+```
+
+### Step 5: Escalate if you can't get high confidence
+
+Security triage is exactly the wrong place to guess. If you can't confidently classify severity, identify the project, or determine exploitability, **escalate to HITL** rather than file a low-confidence incident. Note "unverified" in the Gaps section of the verdict and suggest what a human reviewer should check next.
