@@ -14,13 +14,21 @@ import os
 
 from tools.github_app_auth import read_cached_token
 
-_DEFAULT_REPO = "protoLabsAI/protoMaker"
 _COMMAND_TIMEOUT = 30
 
 
-def get_repo() -> str:
-    """Get the configured GitHub repository (owner/name format)."""
-    return os.environ.get("GITHUB_REPO", _DEFAULT_REPO)
+def get_repo() -> str | None:
+    """Get the configured GitHub repository (owner/name format), or None.
+
+    Used as a caller-supplied fallback. Previously this hardcoded
+    'protoLabsAI/protoMaker' as the default, which silently misrouted
+    queries when an agent forgot to pass an explicit repo — Quinn was
+    observed pulling CodeRabbit feedback from protoMaker during a
+    protoWorkstacean#104 pr_review because the repo arg was omitted and
+    the default kicked in. Now returns None when nothing is configured,
+    so tool schemas can enforce repo as required at the boundary.
+    """
+    return os.environ.get("GITHUB_REPO") or None
 
 
 def _resolve_token() -> str | None:

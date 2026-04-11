@@ -3,7 +3,11 @@
 Analyzes pull requests using the gh CLI -- CI status, unresolved review threads,
 diff summaries, and open PR listings.
 
-Requires: gh CLI authenticated and GITHUB_REPO env var (default: protoLabsAI/protoMaker).
+Requires: gh CLI authenticated. The `repo` argument is REQUIRED on every call
+(owner/name format) — no silent fallback to GITHUB_REPO, no hardcoded default.
+Previously a hardcoded protoLabsAI/protoMaker default caused silent cross-repo
+misrouting when an agent omitted the repo arg (Quinn pulled CodeRabbit feedback
+from the wrong repo during a protoWorkstacean#104 review).
 """
 
 import json
@@ -33,7 +37,10 @@ class PrInspectorTool(Tool):
             "- review_comment: Leave a review comment on a PR (requires pr_number, body)\n"
             "- review_approve: Approve a PR with an optional comment (requires pr_number)\n"
             "- review_request_changes: Request changes on a PR (requires pr_number, body)\n\n"
-            "Default repo from GITHUB_REPO env var (override with repo parameter)."
+            "The `repo` argument is REQUIRED on every call (owner/name format). "
+            "There is no default — the tool errors loudly if omitted. "
+            "This prevents cross-repo misrouting (e.g. pulling CodeRabbit threads "
+            "from the wrong repo because the caller forgot the repo arg)."
         )
 
     @property
@@ -59,15 +66,39 @@ class PrInspectorTool(Tool):
                 },
                 "repo": {
                     "type": "string",
-                    "description": "Repository in owner/name format.",
+                    "description": (
+                        "Repository in owner/name format (e.g. protoLabsAI/protoWorkstacean). "
+                        "REQUIRED on every call — extract this from the PR context in the "
+                        "message, do not guess and do not rely on defaults."
+                    ),
                 },
             },
-            "required": ["action"],
+            "required": ["action", "repo"],
         }
 
     async def execute(self, **kwargs: Any) -> str:
         action = kwargs["action"]
-        repo = kwargs.get("repo") or get_repo()
+        # Fail loudly on missing repo — the #74 incident report showed that
+        # silent fallback to a hardcoded default produced cross-repo
+        # CodeRabbit results on protoWorkstacean#104. If the agent calls
+        # this without a repo it should see the error and retry with the
+        # right one, not silently operate on the wrong repo.
+        repo = kwargs.get("repo")
+        if not repo:
+            env_repo = get_repo()
+            if env_repo:
+                return (
+                    f"Error: pr_inspector requires an explicit `repo` argument on every call. "
+                    f"The GITHUB_REPO env var is set to '{env_repo}' but that is only used as a "
+                    f"last-resort fallback for internal scripts — agent dispatches must pass repo "
+                    f"explicitly from the PR context they were given."
+                )
+            return (
+                "Error: pr_inspector requires a `repo` argument (owner/name format). "
+                "Extract the repo from the PR context in the incoming message."
+            )
+        if "/" not in repo or repo.count("/") != 1:
+            return f"Error: `repo` must be in owner/name format, got '{repo}'."
         pr_number = kwargs.get("pr_number")
         body = kwargs.get("body", "")
 

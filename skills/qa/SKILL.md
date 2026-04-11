@@ -175,17 +175,23 @@ Use this when you receive a dispatch to review a **specific PR** (e.g. from work
 
 **You MUST submit a formal review at the end** — not just narrative commentary. Posting an issue comment instead of a formal review means your verdict never reaches the autonomous merge loop (pr-remediator only reacts to `APPROVED` / `CHANGES_REQUESTED` review states).
 
-### Step 1: Gather evidence
+### Step 1: Extract repo + PR number from the dispatch message
 
-Call `pr_inspector` with all three read-actions against the target PR:
+Before calling any tool, parse the incoming message to determine EXACTLY which repository and PR number you are reviewing. The dispatch typically contains a string like `"GitHub: protoLabsAI/protoWorkstacean#104 — https://github.com/.../pull/104"` or structured metadata. Pull out the `owner/repo` slug and the integer PR number.
+
+**CRITICAL: `repo` is a required argument on every `pr_inspector` call.** There is NO default. If you omit it the tool will error. Never assume the repo from a previous turn — each review starts fresh. Passing the wrong repo will pull CodeRabbit threads, diffs, and CI results from an unrelated codebase and produce a completely invalid review (observed on protoWorkstacean#104 — feedback came back for protoMaker).
+
+### Step 2: Gather evidence
+
+Call `pr_inspector` with all three read-actions against the target PR, passing the repo you extracted in step 1:
 
 - `pr_inspector(action='check_ci', pr_number=N, repo='owner/name')` — CI check states
 - `pr_inspector(action='coderabbit_threads', pr_number=N, repo='owner/name')` — unresolved review threads
 - `pr_inspector(action='diff_summary', pr_number=N, repo='owner/name')` — first 200 lines of the diff
 
-If any of these fail with a tool error, note it in the "Observations" section of your review body and continue — don't abort. Missing evidence is a LOW severity observation, not a blocker.
+If any of these fail with a tool error other than a missing-repo error, note it in the "Observations" section of your review body and continue — don't abort. Missing evidence is a LOW severity observation, not a blocker. If the error is a missing-repo error, STOP — you skipped step 1, go back and parse the repo from the dispatch message, then retry.
 
-### Step 2: Apply the rubric
+### Step 3: Apply the rubric
 
 Grade the PR against the six-dimension rubric from the top of this file (accuracy, usefulness, clarity, engagement, depth, actionability — interpreted as: does the code do what the PR claims, is it readable, is it safe to merge, does it have tests where needed). Produce a VERDICT block:
 
@@ -198,7 +204,7 @@ Gaps: N
 [SEVERITY]: [finding]
 ```
 
-### Step 3: Map VERDICT → formal review action
+### Step 4: Map VERDICT → formal review action
 
 **This is the critical step.** The autonomous merge loop depends on Quinn submitting one of three formal review actions, chosen deterministically from the VERDICT:
 
@@ -210,7 +216,7 @@ Gaps: N
 
 **Never skip this step.** If you return a narrative summary without calling `pr_inspector` with `review_approve` / `review_comment` / `review_request_changes`, the caller sees text but the pipeline sees no review. The PR sits stuck forever.
 
-### Step 4: Submit the formal review
+### Step 5: Submit the formal review
 
 Call `pr_inspector` with the chosen action. Body format:
 
@@ -237,9 +243,9 @@ Call `pr_inspector` with the chosen action. Body format:
 
 Keep the body under 2000 characters for readability. Put detail in the observations, not in long prose.
 
-### Step 5: Report back
+### Step 6: Report back
 
-Return a one-sentence confirmation to the caller: "`Submitted {APPROVE|REQUEST_CHANGES|COMMENT} review on {owner/repo}#{N}.`" This is the signal to the skill dispatcher that you completed the task. The formal review content already landed on GitHub in step 4 — the return value is for the bus, not for the PR.
+Return a one-sentence confirmation to the caller: "`Submitted {APPROVE|REQUEST_CHANGES|COMMENT} review on {owner/repo}#{N}.`" This is the signal to the skill dispatcher that you completed the task. The formal review content already landed on GitHub in step 5 — the return value is for the bus, not for the PR.
 
 ### Safety rail — never approve your own work
 
