@@ -786,6 +786,23 @@ def _main():
                     "tags": ["qa", "github"],
                     "examples": ["review open PRs", "check CI on PR #123"],
                 },
+                {
+                    "id": "security_triage",
+                    "name": "Security Triage",
+                    "description": (
+                        "Triage incoming security incidents: CVE reports, vulnerability disclosures, "
+                        "dependabot alerts, auth/permissions failures. Classify severity (critical / "
+                        "high / medium / low), route to the right project, and file a tracked "
+                        "incident on the board. Critical findings escalate to HITL before any "
+                        "autonomous remediation runs."
+                    ),
+                    "tags": ["security", "triage", "incident"],
+                    "examples": [
+                        "triage security issue: CVE-2026-1234 in lodash",
+                        "incoming dependabot alert on protoMaker — what's the severity?",
+                        "security incident: suspicious auth pattern in /api/login",
+                    ],
+                },
             ],
             "securitySchemes": {
                 "apiKey": {"type": "apiKey", "in": "header", "name": "X-API-Key"}
