@@ -49,6 +49,11 @@ services:
       # LiteLLM gateway (master key from Infisical AI project)
       - OPENAI_API_KEY=${LITELLM_MASTER_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # GitHub App auth — entrypoint mints an installation token so Quinn
+      # posts PR reviews as @protoquinn[bot] instead of the GITHUB_TOKEN
+      # owner. Background refresher keeps it fresh every 45 min.
+      - QUINN_APP_ID=${QUINN_APP_ID:-}
+      - QUINN_APP_PRIVATE_KEY=${QUINN_APP_PRIVATE_KEY:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_ALERTS:-}
       - DISCORD_GUILD_ID=${DISCORD_GUILD_ID:-1070606339363049492}
       # protoLabs Studio API (automaker-server on shared Docker network)
