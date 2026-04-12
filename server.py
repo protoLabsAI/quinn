@@ -742,7 +742,7 @@ def _main():
             "description": (
                 "protoLabs.studio QA Engineer. Audits board health, inspects PRs, "
                 "triages bugs from Discord and GitHub, generates QA reports, "
-                "and files confirmed bugs on the Ava board."
+                "and files confirmed bugs on the protoMaker team board."
             ),
             "url": f"http://{host}",
             "version": "1.0.0",
@@ -775,7 +775,7 @@ def _main():
                 {
                     "id": "bug_triage",
                     "name": "Bug Triage",
-                    "description": "Triage a bug report and file it on the Ava board with severity classification.",
+                    "description": "Triage a bug report and file it on the protoMaker team board with severity classification.",
                     "tags": ["bugs", "triage"],
                     "examples": ["triage this bug: ...", "file a bug for issue #42"],
                 },

@@ -7,7 +7,7 @@ Quinn monitors the board across all apps in your portfolio, triages bugs, verifi
 ## What Quinn Does
 
 - **Board Monitoring** — Scans blocked features, stale PRs, review queue saturation across all configured apps
-- **Bug Triage** — Classifies Discord/GitHub bug reports, files them on the Ava board via `file_bug`
+- **Bug Triage** — Classifies Discord/GitHub bug reports, files them on the protoMaker team board via `file_bug`
 - **PR Verification** — Checks CI status, CodeRabbit threads, auto-merge readiness
 - **Release QA** — Runs verification playbooks: typecheck, wiring, endpoint contracts, visual QA
 - **Release Notes** — Generates changelogs from git history, merged PRs, and board state
@@ -26,7 +26,7 @@ Quinn (LangGraph Agent)  ← model: protolabs/quinn (Opus via LiteLLM gateway)
         |
         v
 LiteLLM Gateway (http://gateway:4000)
-protoLabs Studio API (Ava board)
+protoLabs Studio API (protoMaker team board)
 GitHub CLI
 Discord Webhooks
 ```
@@ -44,7 +44,7 @@ Discord Webhooks
 - Docker and Docker Compose
 - [Infisical CLI](https://infisical.com/docs/cli/overview) installed and logged in to `secrets.proto-labs.ai`
 - LiteLLM gateway running (`stacks/ai`) with `protolabs/quinn` alias configured
-- protoLabs Studio server (Ava) running (default: `http://automaker-server:3008`)
+- protoLabs Studio server (the protoMaker team runtime) running (default: `http://automaker-server:3008`)
 
 ### 1. Clone and configure
 

@@ -1,4 +1,4 @@
-"""File a bug on the protoLabs Studio board via Ava's API.
+"""File a bug on the protoLabs Studio board via the protoMaker team API.
 
 Quinn uses this after triaging a Discord/GitHub bug report to create
 a tracked feature on the board and optionally notify the reporter.
@@ -18,7 +18,7 @@ _REQUEST_TIMEOUT = 20
 
 
 class FileBugTool(Tool):
-    """Create a bug feature on the protoLabs Studio board via Ava."""
+    """Create a bug feature on the protoLabs Studio board via the protoMaker team API."""
 
     @property
     def name(self) -> str:

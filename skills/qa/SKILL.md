@@ -211,8 +211,8 @@ Gaps: N
 | VERDICT | pr_inspector action | GitHub review state | When |
 |---------|---------------------|---------------------|------|
 | **PASS** | `review_approve` | `APPROVED` | All critical checks pass, no blocking issues, no HIGH/CRITICAL findings. Feeds `pr_pipeline.readyToMerge` and triggers auto-merge. |
-| **WARN** | `review_comment` | `COMMENTED` | Critical checks pass but there are medium/low concerns worth flagging, or confidence is below the 80% threshold for approval. Does NOT block merge; surfaces the concerns for human or Ava to weigh. |
-| **FAIL** | `review_request_changes` | `CHANGES_REQUESTED` | One or more CRITICAL or HIGH findings, broken CI, or verified defect. Feeds `pr_pipeline.changesRequested` and triggers `pr_address_feedback` to dispatch Ava for remediation. |
+| **WARN** | `review_comment` | `COMMENTED` | Critical checks pass but there are medium/low concerns worth flagging, or confidence is below the 80% threshold for approval. Does NOT block merge; surfaces the concerns for a human or the protoMaker team to weigh. |
+| **FAIL** | `review_request_changes` | `CHANGES_REQUESTED` | One or more CRITICAL or HIGH findings, broken CI, or verified defect. Feeds `pr_pipeline.changesRequested` and triggers `pr_address_feedback` to dispatch the protoMaker team for remediation. |
 
 **Never skip this step.** If you return a narrative summary without calling `pr_inspector` with `review_approve` / `review_comment` / `review_request_changes`, the caller sees text but the pipeline sees no review. The PR sits stuck forever.
 
