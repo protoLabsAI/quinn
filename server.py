@@ -744,7 +744,13 @@ def _main():
                 "triages bugs from Discord and GitHub, generates QA reports, "
                 "and files confirmed bugs on the protoMaker team board."
             ),
-            "url": f"http://{host}",
+            # A2A spec requires the `url` field to point at the RPC endpoint
+            # (where message/send is accepted), NOT the server root. Quinn
+            # serves JSON-RPC only at /a2a, so the card must advertise that
+            # path — otherwise A2A SDK clients that honor the card URL send
+            # message/send to `/` and get a 405 Method Not Allowed from
+            # FastAPI. Confirmed against workstacean's @a2a-js/sdk executor.
+            "url": f"http://{host}/a2a",
             "version": "1.0.0",
             "provider": {
                 "organization": "protoLabsAI",
