@@ -45,6 +45,7 @@ COPY tracing.py /opt/quinn/tracing.py
 COPY metrics.py /opt/quinn/metrics.py
 COPY chat_ui.py /opt/quinn/chat_ui.py
 COPY server.py /opt/quinn/server.py
+COPY a2a_handler.py /opt/quinn/a2a_handler.py
 COPY discord_bot.py /opt/quinn/discord_bot.py
 COPY guardrails.py /opt/quinn/guardrails.py
 COPY entrypoint.sh /opt/quinn/entrypoint.sh
