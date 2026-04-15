@@ -60,9 +60,12 @@ services:
       - PROTOLABS_SERVER_URL=${PROTOLABS_SERVER_URL:-http://automaker-server:3008}
       - PROTOLABS_API_KEY=${PROTOLABS_API_KEY:?PROTOLABS_API_KEY must be set via infisical}
       - PROTOLABS_PROJECT_PATH=${PROTOLABS_PROJECT_PATH:-/home/josh/dev/ava}
-      # protoWorkstacean API (ceremonies / scheduled agent skills)
+      # protoWorkstacean API (ceremonies / scheduled agent skills).
+      # Map Quinn's per-agent key onto the generic var the app reads, so
+      # Quinn's traffic is attributable (vs the shared WORKSTACEAN_API_KEY
+      # that other consumers use).
       - WORKSTACEAN_URL=${WORKSTACEAN_URL:-http://workstacean:3000}
-      - WORKSTACEAN_API_KEY=${WORKSTACEAN_API_KEY:-}
+      - WORKSTACEAN_API_KEY=${WORKSTACEAN_API_KEY_QUINN:-}
       # Langfuse tracing (optional)
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
