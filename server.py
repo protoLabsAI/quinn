@@ -18,7 +18,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from chat_ui import create_chat_app
+# chat_ui pulls in gradio, which the server needs at runtime but which would
+# otherwise block anyone from importing tiny helpers (e.g. _build_agent_card)
+# out of this module for tests. Keep the import inside _main().
 
 # ---------------------------------------------------------------------------
 # Agent setup
@@ -349,6 +351,69 @@ async def chat(message: str, session_id: str) -> list[dict[str, Any]]:
     return _msg("**Error:** No agent backend initialized.")
 
 
+async def _chat_langgraph_stream(message: str, session_id: str):
+    """Async generator that yields (event_type, payload) tuples via astream_events.
+
+    Consumed by a2a_handler.register_a2a_routes to drive SSE streaming and
+    background task execution on A2A message/send[Stream] calls. The event
+    types mirror what a2a_handler expects:
+
+        - "tool_start" / "tool_end"  — status frames with tool name preview
+        - "text"                      — incremental model output chunks
+        - "done"                      — terminal state, payload is final text
+        - "error"                     — terminal state, payload is error msg
+    """
+    import tracing
+    from langchain_core.messages import HumanMessage
+
+    tracing.start_trace(
+        session_id=session_id, name="quinn-a2a-stream",
+        metadata={"message_preview": message[:100]},
+    )
+    try:
+        # thread_id prefix isolates A2A sessions from Gradio chat in the
+        # shared MemorySaver checkpointer. Each A2A contextId gets its own slot.
+        config = {"configurable": {"thread_id": f"a2a:{session_id}"}, "recursion_limit": 200}
+        if _checkpointer:
+            config["checkpointer"] = _checkpointer
+
+        accumulated_text = ""
+
+        async for event in _graph.astream_events(
+            {"messages": [HumanMessage(content=message)], "session_id": session_id},
+            config=config,
+            version="v2",
+        ):
+            kind = event.get("event", "")
+            name = event.get("name", "")
+
+            if kind == "on_tool_start":
+                tool_input = event.get("data", {}).get("input", "")
+                preview = str(tool_input)[:200] if tool_input else ""
+                yield ("tool_start", f"🔧 {name}: {preview}")
+
+            elif kind == "on_tool_end":
+                output = event.get("data", {}).get("output", "")
+                preview = str(output)[:300] if output else ""
+                yield ("tool_end", f"✅ {name} → {preview}")
+
+            elif kind == "on_chat_model_stream":
+                chunk = event.get("data", {}).get("chunk")
+                if chunk and hasattr(chunk, "content") and chunk.content:
+                    content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                    content = _strip_think(content)
+                    if content:
+                        accumulated_text += content
+                        yield ("text", content)
+
+        yield ("done", _strip_think(accumulated_text))
+
+    except Exception as e:
+        yield ("error", str(e))
+    finally:
+        tracing.end_trace()
+
+
 async def _chat_langgraph(message: str, session_id: str) -> list[dict[str, Any]]:
     """Process via LangGraph agent backend."""
     import tracing
@@ -600,6 +665,89 @@ def _seed_apps():
         print(f"[quinn] App seeding failed: {e}")
 
 
+def _build_agent_card(host: str) -> dict:
+    """Quinn's A2A agent card. Module-level so tests can exercise it without
+    spinning up the full Gradio/FastAPI runtime."""
+    return {
+        "name": "quinn",
+        "description": (
+            "protoLabs.studio QA Engineer. Audits board health, inspects PRs, "
+            "triages bugs from Discord and GitHub, generates QA reports, "
+            "and files confirmed bugs on the protoMaker team board."
+        ),
+        # A2A spec requires the `url` field to point at the RPC endpoint
+        # (where message/send is accepted), NOT the server root. Quinn
+        # serves JSON-RPC only at /a2a, so the card must advertise that
+        # path — otherwise A2A SDK clients that honor the card URL send
+        # message/send to `/` and get a 405 Method Not Allowed from
+        # FastAPI. Confirmed against workstacean's @a2a-js/sdk executor.
+        "url": f"http://{host}/a2a",
+        "version": "1.0.0",
+        "provider": {
+            "organization": "protoLabsAI",
+            "url": "https://github.com/protoLabsAI",
+        },
+        "capabilities": {
+            "streaming": True,
+            "pushNotifications": True,
+            "stateTransitionHistory": False,
+        },
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/markdown"],
+        "skills": [
+            {
+                "id": "qa_report",
+                "name": "QA Report",
+                "description": "Generate a QA digest: board health, recent reports, active bugs.",
+                "tags": ["qa", "monitoring"],
+                "examples": ["/report", "run a qa report", "what's the qa status?"],
+            },
+            {
+                "id": "board_audit",
+                "name": "Board Audit",
+                "description": "Audit protoLabs Studio board: blocked features, stalled PRs, CI failures.",
+                "tags": ["qa", "board"],
+                "examples": ["audit the board", "what's blocked?", "check board health"],
+            },
+            {
+                "id": "bug_triage",
+                "name": "Bug Triage",
+                "description": "Triage a bug report and file it on the protoMaker team board with severity classification.",
+                "tags": ["bugs", "triage"],
+                "examples": ["triage this bug: ...", "file a bug for issue #42"],
+            },
+            {
+                "id": "pr_review",
+                "name": "PR Review",
+                "description": "Inspect open PRs: CI status, unresolved review threads, diff summary.",
+                "tags": ["qa", "github"],
+                "examples": ["review open PRs", "check CI on PR #123"],
+            },
+            {
+                "id": "security_triage",
+                "name": "Security Triage",
+                "description": (
+                    "Triage incoming security incidents: CVE reports, vulnerability disclosures, "
+                    "dependabot alerts, auth/permissions failures. Classify severity (critical / "
+                    "high / medium / low), route to the right project, and file a tracked "
+                    "incident on the board. Critical findings escalate to HITL before any "
+                    "autonomous remediation runs."
+                ),
+                "tags": ["security", "triage", "incident"],
+                "examples": [
+                    "triage security issue: CVE-2026-1234 in lodash",
+                    "incoming dependabot alert on protoMaker — what's the severity?",
+                    "security incident: suspicious auth pattern in /api/login",
+                ],
+            },
+        ],
+        "securitySchemes": {
+            "apiKey": {"type": "apiKey", "in": "header", "name": "X-API-Key"}
+        },
+        "security": [{"apiKey": []}],
+    }
+
+
 def _main():
     parser = argparse.ArgumentParser(description="Quinn QA Gradio UI")
     parser.add_argument("--port", type=int, default=7870)
@@ -617,6 +765,8 @@ def _main():
 
     # Seed default tracked apps
     _seed_apps()
+
+    from chat_ui import create_chat_app
 
     blocks = create_chat_app(
         chat_fn=chat,
@@ -730,91 +880,16 @@ def _main():
 
     # ---------------------------------------------------------------------------
     # A2A — Google Agent2Agent protocol
-    # GET  /.well-known/agent.json   — agent card (unauthenticated)
-    # POST /a2a                      — message/send handler (no auth — open for now)
+    # GET  /.well-known/agent{.json,-card.json}  — agent card (unauthenticated)
+    # POST /a2a                                  — JSON-RPC: message/send, message/sendStream
+    # POST /message:send, /message:stream        — REST aliases
+    # GET  /tasks/{id}, /tasks/{id}:subscribe    — poll / SSE reconnect
+    # POST /tasks/{id}:cancel                    — cancel
+    # POST /tasks/{id}/pushNotificationConfigs   — register webhook
+    #
+    # Auth: QUINN_API_KEY env var. Unset → open (same behaviour as pre-port).
     # ---------------------------------------------------------------------------
-    import uuid as _uuid
     from fastapi.responses import JSONResponse as _JSONResponse
-
-    def _build_agent_card(host: str) -> dict:
-        return {
-            "name": "quinn",
-            "description": (
-                "protoLabs.studio QA Engineer. Audits board health, inspects PRs, "
-                "triages bugs from Discord and GitHub, generates QA reports, "
-                "and files confirmed bugs on the protoMaker team board."
-            ),
-            # A2A spec requires the `url` field to point at the RPC endpoint
-            # (where message/send is accepted), NOT the server root. Quinn
-            # serves JSON-RPC only at /a2a, so the card must advertise that
-            # path — otherwise A2A SDK clients that honor the card URL send
-            # message/send to `/` and get a 405 Method Not Allowed from
-            # FastAPI. Confirmed against workstacean's @a2a-js/sdk executor.
-            "url": f"http://{host}/a2a",
-            "version": "1.0.0",
-            "provider": {
-                "organization": "protoLabsAI",
-                "url": "https://github.com/protoLabsAI",
-            },
-            "capabilities": {
-                "streaming": False,
-                "pushNotifications": False,
-                "stateTransitionHistory": False,
-            },
-            "defaultInputModes": ["text/plain"],
-            "defaultOutputModes": ["text/markdown"],
-            "skills": [
-                {
-                    "id": "qa_report",
-                    "name": "QA Report",
-                    "description": "Generate a QA digest: board health, recent reports, active bugs.",
-                    "tags": ["qa", "monitoring"],
-                    "examples": ["/report", "run a qa report", "what's the qa status?"],
-                },
-                {
-                    "id": "board_audit",
-                    "name": "Board Audit",
-                    "description": "Audit protoLabs Studio board: blocked features, stalled PRs, CI failures.",
-                    "tags": ["qa", "board"],
-                    "examples": ["audit the board", "what's blocked?", "check board health"],
-                },
-                {
-                    "id": "bug_triage",
-                    "name": "Bug Triage",
-                    "description": "Triage a bug report and file it on the protoMaker team board with severity classification.",
-                    "tags": ["bugs", "triage"],
-                    "examples": ["triage this bug: ...", "file a bug for issue #42"],
-                },
-                {
-                    "id": "pr_review",
-                    "name": "PR Review",
-                    "description": "Inspect open PRs: CI status, unresolved review threads, diff summary.",
-                    "tags": ["qa", "github"],
-                    "examples": ["review open PRs", "check CI on PR #123"],
-                },
-                {
-                    "id": "security_triage",
-                    "name": "Security Triage",
-                    "description": (
-                        "Triage incoming security incidents: CVE reports, vulnerability disclosures, "
-                        "dependabot alerts, auth/permissions failures. Classify severity (critical / "
-                        "high / medium / low), route to the right project, and file a tracked "
-                        "incident on the board. Critical findings escalate to HITL before any "
-                        "autonomous remediation runs."
-                    ),
-                    "tags": ["security", "triage", "incident"],
-                    "examples": [
-                        "triage security issue: CVE-2026-1234 in lodash",
-                        "incoming dependabot alert on protoMaker — what's the severity?",
-                        "security incident: suspicious auth pattern in /api/login",
-                    ],
-                },
-            ],
-            "securitySchemes": {
-                "apiKey": {"type": "apiKey", "in": "header", "name": "X-API-Key"}
-            },
-            "security": [{"apiKey": []}],
-        }
 
     @fastapi_app.get("/.well-known/agent.json", include_in_schema=False)
     @fastapi_app.get("/.well-known/agent-card.json", include_in_schema=False)
@@ -825,56 +900,20 @@ def _main():
             headers={"Cache-Control": "public, max-age=60"},
         )
 
-    @fastapi_app.post("/a2a", include_in_schema=False)
-    async def _a2a_handler(request: Request):
-        try:
-            body = await request.json()
-        except Exception:
-            return _JSONResponse(status_code=400, content={
-                "jsonrpc": "2.0", "id": None,
-                "error": {"code": -32700, "message": "Parse error"},
-            })
+    # A2A routes (JSON-RPC + REST, streaming, polling, cancel, push webhooks).
+    # The card is already served above by _a2a_agent_card at two well-known
+    # paths for @a2a-js/sdk compat — pass register_card_route=False so the
+    # handler doesn't try to register /.well-known/agent.json a second time.
+    from a2a_handler import register_a2a_routes
 
-        rpc_id = body.get("id")
-        method = body.get("method")
-
-        if method != "message/send":
-            return _JSONResponse(content={
-                "jsonrpc": "2.0", "id": rpc_id,
-                "error": {"code": -32601, "message": f"Method not found: {method}. Supported: message/send"},
-            })
-
-        parts = body.get("params", {}).get("message", {}).get("parts", [])
-        user_text = "\n".join(
-            p.get("text", "") for p in parts if (p.get("kind") or p.get("type")) == "text"
-        ).strip()
-
-        if not user_text:
-            return _JSONResponse(content={
-                "jsonrpc": "2.0", "id": rpc_id,
-                "error": {"code": -32602, "message": "Invalid params: message must contain a text part"},
-            })
-
-        session_id = f"a2a-{_uuid.uuid4().hex[:8]}"
-        result = await chat(user_text, session_id)
-        response_text = "\n\n".join(
-            m["content"] for m in result if m.get("role") == "assistant" and m.get("content")
-        )
-
-        task_id = str(_uuid.uuid4())
-        return _JSONResponse(content={
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "result": {
-                "id": task_id,
-                "contextId": str(_uuid.uuid4()),
-                "status": {"state": "completed"},
-                "artifacts": [{
-                    "artifactId": str(_uuid.uuid4()),
-                    "parts": [{"kind": "text", "text": response_text}],
-                }],
-            },
-        })
+    register_a2a_routes(
+        app=fastapi_app,
+        chat_stream_fn_factory=_chat_langgraph_stream,
+        chat_fn=chat,
+        api_key=os.environ.get("QUINN_API_KEY", ""),
+        agent_card={},
+        register_card_route=False,
+    )
 
     # Prometheus /metrics endpoint
     if metrics.is_enabled():
