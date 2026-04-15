@@ -203,13 +203,13 @@ async def test_background_runner_success():
 
     push_calls = []
 
-    async def _push(r):
+    async def _fake_push(r):
         push_calls.append(r.state)
 
     stream_fn = lambda: _mock_stream(("text", "hello "), ("text", "world"), ("done", "hello world"))
 
-    with patch("a2a_handler._store", store):
-        await _run_task_background("bg-test", stream_fn, _push)
+    with patch("a2a_handler._store", store), patch("a2a_handler._push", _fake_push):
+        await _run_task_background("bg-test", stream_fn)
 
     final = await store.get("bg-test")
     assert final.state == COMPLETED
@@ -226,13 +226,13 @@ async def test_background_runner_error():
 
     push_calls = []
 
-    async def _push(r):
+    async def _fake_push(r):
         push_calls.append(r.state)
 
     stream_fn = lambda: _mock_stream(("text", "partial"), ("error", "boom"))
 
-    with patch("a2a_handler._store", store):
-        await _run_task_background("bg-err", stream_fn, _push)
+    with patch("a2a_handler._store", store), patch("a2a_handler._push", _fake_push):
+        await _run_task_background("bg-err", stream_fn)
 
     final = await store.get("bg-err")
     assert final.state == FAILED
@@ -249,16 +249,45 @@ async def test_background_runner_cancel():
     # Pre-set the cancel event so the runner exits immediately
     record._cancel_event.set()
 
-    async def _push(r):
+    async def _noop_push(r):
         pass
 
     stream_fn = lambda: _mock_stream(("text", "should not process"))
 
-    with patch("a2a_handler._store", store):
-        await _run_task_background("bg-cancel", stream_fn, _push)
+    with patch("a2a_handler._store", store), patch("a2a_handler._push", _noop_push):
+        await _run_task_background("bg-cancel", stream_fn)
 
     final = await store.get("bg-cancel")
     assert final.state == CANCELED
+
+
+# ── _push reads live push_config ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_push_reads_push_config_from_live_record():
+    """Regression: _push must read record.push_config at call time, not close
+    over a submit-time value. Otherwise POST /tasks/{id}/pushNotificationConfigs
+    would silently never reach in-flight tasks."""
+    from a2a_handler import _push
+
+    record = _make_record(state=WORKING)
+    # No push config yet — _push should no-op.
+    delivered = []
+
+    async def _fake_deliver(r, cfg):
+        delivered.append(cfg.url)
+
+    with patch("a2a_handler._deliver_webhook", _fake_deliver):
+        await _push(record)
+        await asyncio.sleep(0)  # drain create_task
+        assert delivered == []
+
+        # Caller registers a webhook after submit — _push must pick it up.
+        record.push_config = PushNotificationConfig(url="http://late.example/hook")
+        await _push(record)
+        await asyncio.sleep(0)
+        assert delivered == ["http://late.example/hook"]
 
 
 # ── Webhook delivery ──────────────────────────────────────────────────────────

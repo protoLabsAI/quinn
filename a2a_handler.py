@@ -307,12 +307,18 @@ async def _deliver_webhook(record: TaskRecord, push_config: PushNotificationConf
     logger.error("[a2a] webhook failed after %d attempts: %s", len(backoff), push_config.url)
 
 
-def _make_push_fn(push_config: PushNotificationConfig | None):
-    async def _push(record: TaskRecord) -> None:
-        if push_config and record.state in _TERMINAL | {WORKING}:
-            asyncio.create_task(_deliver_webhook(record, push_config))
+async def _push(record: TaskRecord) -> None:
+    """Fire webhook delivery for *record* if a push config is currently
+    registered on it.
 
-    return _push
+    Reads record.push_config at call time rather than closing over the
+    submit-time value — otherwise a caller who registered a webhook via
+    POST /tasks/{id}/pushNotificationConfigs *after* submitting would
+    never receive any state transitions.
+    """
+    cfg = record.push_config
+    if cfg and record.state in _TERMINAL | {WORKING}:
+        asyncio.create_task(_deliver_webhook(record, cfg))
 
 
 # ── Background task runner ────────────────────────────────────────────────────
@@ -321,13 +327,12 @@ def _make_push_fn(push_config: PushNotificationConfig | None):
 async def _run_task_background(
     task_id: str,
     stream_fn: Callable[[], AsyncGenerator],
-    push_fn,
 ) -> None:
     """Run LangGraph in the background, writing state updates to the task store."""
     record = await _store.update_state(task_id, WORKING)
     if record is None:
         return
-    await push_fn(record)
+    await _push(record)
 
     accumulated = ""
     try:
@@ -353,12 +358,12 @@ async def _run_task_background(
                     COMPLETED,
                     accumulated_text=payload or accumulated,
                 )
-                await push_fn(record)
+                await _push(record)
                 return
 
             elif event_type == "error":
                 record = await _store.update_state(task_id, FAILED, error=payload)
-                await push_fn(record)
+                await _push(record)
                 return
 
     except asyncio.CancelledError:
@@ -367,7 +372,7 @@ async def _run_task_background(
     except Exception as exc:
         logger.exception("[a2a] background task %s crashed", task_id)
         record = await _store.update_state(task_id, FAILED, error=str(exc))
-        await push_fn(record)
+        await _push(record)
 
 
 # ── SSE helpers ───────────────────────────────────────────────────────────────
@@ -446,12 +451,10 @@ def register_a2a_routes(
         )
         await _store.create(record)
 
-        push_fn = _make_push_fn(push_config)
         bg = asyncio.create_task(
             _run_task_background(
                 task_id,
                 lambda: chat_stream_fn_factory(text, context_id),
-                push_fn,
             )
         )
         record._bg_task = bg
@@ -491,13 +494,14 @@ def register_a2a_routes(
             },
         )
 
-        push_fn = _make_push_fn(push_config)
         accumulated = ""
         last_emitted_len = 0
 
         try:
             await _store.update_state(task_id, WORKING)
-            await push_fn(await _store.get(task_id))
+            working_record = await _store.get(task_id)
+            if working_record is not None:
+                await _push(working_record)
 
             yield _sse_rpc(
                 rpc_id,
@@ -558,7 +562,8 @@ def register_a2a_routes(
                 elif event_type == "done":
                     final_text = payload or accumulated
                     r = await _store.update_state(task_id, COMPLETED, accumulated_text=final_text)
-                    await push_fn(r)
+                    if r is not None:
+                        await _push(r)
                     yield _sse_rpc(
                         rpc_id,
                         {
@@ -574,7 +579,8 @@ def register_a2a_routes(
 
                 elif event_type == "error":
                     r = await _store.update_state(task_id, FAILED, error=payload)
-                    await push_fn(r)
+                    if r is not None:
+                        await _push(r)
                     yield _sse_rpc(
                         rpc_id,
                         {
@@ -592,7 +598,8 @@ def register_a2a_routes(
         except Exception as exc:
             logger.exception("[a2a] stream task %s crashed", task_id)
             r = await _store.update_state(task_id, FAILED, error=str(exc))
-            await push_fn(r)
+            if r is not None:
+                await _push(r)
             yield _sse_rpc(
                 rpc_id,
                 {
