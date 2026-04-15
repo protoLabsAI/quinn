@@ -194,14 +194,29 @@ class KnowledgeStore:
         now = self._now_iso()
 
         existing = db.execute(
-            "SELECT id, occurrences FROM bug_patterns WHERE title = ? AND app_name = ?",
+            "SELECT id, occurrences, related_features FROM bug_patterns WHERE title = ? AND app_name = ?",
             (title, app_name),
         ).fetchone()
 
         if existing:
+            # Union the incoming feature IDs into whatever is already on the
+            # row — the whole point of related_features is cross-feature
+            # clustering, so losing this list on re-occurrence (the original
+            # UPSERT behaviour) defeated the column. Order-preserving dedup
+            # so the stored list doesn't churn.
+            try:
+                prior = json.loads(existing[2]) if existing[2] else []
+                if not isinstance(prior, list):
+                    prior = []
+            except (TypeError, ValueError):
+                prior = []
+            merged = list(dict.fromkeys(prior + (related_features or [])))
             db.execute(
-                "UPDATE bug_patterns SET occurrences = ?, last_seen = ?, resolved = 0 WHERE id = ?",
-                (existing[1] + 1, now, existing[0]),
+                """UPDATE bug_patterns
+                   SET occurrences = ?, last_seen = ?, resolved = 0,
+                       related_features = ?
+                   WHERE id = ?""",
+                (existing[1] + 1, now, json.dumps(merged), existing[0]),
             )
         else:
             cursor = db.execute(

@@ -87,6 +87,95 @@ def test_migration_is_idempotent() -> None:
     assert "related_features" in _columns(db, "bug_patterns")
 
 
+def test_upsert_merges_related_features(tmp_path, monkeypatch) -> None:
+    """Issue #10 — when a second report of the same bug (same title +
+    app_name) comes in with a different related_features list, the UPSERT
+    path must UNION the lists instead of leaving the existing one untouched.
+    Dropping the incoming features defeats the whole purpose of the column
+    (cross-feature clustering)."""
+    import json
+
+    # Route KnowledgeStore._get_db() at a fresh temp DB — no Ollama needed,
+    # _store_vector fails gracefully when embeddings are unreachable.
+    db_path = tmp_path / "qa.db"
+    store = KnowledgeStore(db_path=db_path, ollama_url="http://unreachable:0")
+
+    # First occurrence: bug seen in feature-1
+    assert store.add_bug_pattern(
+        title="Button crashes in Safari",
+        description="Uncaught TypeError",
+        app_name="protomaker",
+        severity="HIGH",
+        category="wiring",
+        related_features=["feature-1"],
+    )
+
+    # Second occurrence: same bug, now seen in feature-2
+    assert store.add_bug_pattern(
+        title="Button crashes in Safari",
+        description="(second report)",
+        app_name="protomaker",
+        severity="HIGH",
+        category="wiring",
+        related_features=["feature-2"],
+    )
+
+    # Third occurrence: feature-1 again — dedup kicks in, occurrences bumps
+    assert store.add_bug_pattern(
+        title="Button crashes in Safari",
+        description="(third report)",
+        app_name="protomaker",
+        severity="HIGH",
+        category="wiring",
+        related_features=["feature-1"],
+    )
+
+    rows = store._get_db().execute(
+        "SELECT occurrences, related_features FROM bug_patterns WHERE title = ?",
+        ("Button crashes in Safari",),
+    ).fetchall()
+    assert len(rows) == 1
+    occ, features_json = rows[0]
+    assert occ == 3
+    # Order-preserving union; no duplicates
+    assert json.loads(features_json) == ["feature-1", "feature-2"]
+
+
+def test_upsert_handles_legacy_null_related_features(tmp_path) -> None:
+    """Rows inserted before the related_features column landed may have
+    NULL in that slot. Merge must cope without blowing up."""
+    import json
+
+    db_path = tmp_path / "qa.db"
+    store = KnowledgeStore(db_path=db_path, ollama_url="http://unreachable:0")
+
+    # Seed a legacy-shaped row with NULL related_features
+    db = store._get_db()
+    now = "2026-01-01T00:00:00+00:00"
+    db.execute(
+        """INSERT INTO bug_patterns
+           (title, description, app_name, severity, category, pattern,
+            occurrences, first_seen, last_seen, resolved, resolution,
+            related_features)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 0, ?, NULL)""",
+        ("Legacy bug", "desc", "protomaker", "HIGH", "wiring", "", now, now, ""),
+    )
+    db.commit()
+
+    assert store.add_bug_pattern(
+        title="Legacy bug", description="(re-report)",
+        app_name="protomaker", severity="HIGH", category="wiring",
+        related_features=["feature-1", "feature-2"],
+    )
+
+    row = db.execute(
+        "SELECT occurrences, related_features FROM bug_patterns WHERE title = ?",
+        ("Legacy bug",),
+    ).fetchone()
+    assert row[0] == 2
+    assert json.loads(row[1]) == ["feature-1", "feature-2"]
+
+
 def test_insert_bug_pattern_with_related_features_succeeds() -> None:
     """The INSERT shape that previously raised 'no such column' must work
     against both a fresh canonical DB and a migrated legacy DB."""
