@@ -60,6 +60,9 @@ services:
       - PROTOLABS_SERVER_URL=${PROTOLABS_SERVER_URL:-http://automaker-server:3008}
       - PROTOLABS_API_KEY=${PROTOLABS_API_KEY:?PROTOLABS_API_KEY must be set via infisical}
       - PROTOLABS_PROJECT_PATH=${PROTOLABS_PROJECT_PATH:-/home/josh/dev/ava}
+      # protoWorkstacean API (ceremonies / scheduled agent skills)
+      - WORKSTACEAN_URL=${WORKSTACEAN_URL:-http://workstacean:3000}
+      - WORKSTACEAN_API_KEY=${WORKSTACEAN_API_KEY:-}
       # Langfuse tracing (optional)
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}

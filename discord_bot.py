@@ -5,8 +5,11 @@ Runs as a background task alongside the Gradio server. Provides:
 - Clipboard emoji trigger for QA analysis
 - Community moderation (spam filtering, rate limiting)
 - Slash commands (/quinn status, /quinn bugs, /quinn release)
-- Daily digest posting
 - New member welcome messages
+
+Scheduled jobs (e.g. daily QA digest) are owned by protoWorkstacean ceremonies;
+Quinn registers them via the manage_cron tool rather than running her own
+asyncio scheduler.
 
 Requires DISCORD_BOT_TOKEN env var. Optional: DISCORD_GUILD_ID,
 WELCOME_CHANNEL_ID, MODERATION_LOG_CHANNEL_ID.
@@ -20,7 +23,7 @@ import re
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -55,9 +58,6 @@ _ADMIN_ROLE_IDS = set(filter(None, os.environ.get("QUINN_ADMIN_ROLE_IDS", "").sp
 # GUILDS (1<<0) | GUILD_MEMBERS (1<<1) | GUILD_MESSAGES (1<<9)
 # | GUILD_MESSAGE_REACTIONS (1<<10) | MESSAGE_CONTENT (1<<15)
 _GATEWAY_INTENTS = (1 << 0) | (1 << 1) | (1 << 9) | (1 << 10) | (1 << 15)
-
-# Daily digest scheduling -- 2 PM UTC = 7 AM PT by default
-_DIGEST_HOUR = int(os.environ.get("DIGEST_HOUR_UTC", "14"))
 
 MODERATION_CONFIG: dict[str, Any] = {
     "spam_patterns": [
@@ -854,126 +854,6 @@ async def _handle_guild_member_add(data: dict):
 
 
 # ---------------------------------------------------------------------------
-# Daily digest
-# ---------------------------------------------------------------------------
-
-# Default channel for daily digest (protoLabs #dev)
-_DIGEST_CHANNEL_ID = os.environ.get("DIGEST_CHANNEL_ID", "1469080556720623699")
-
-
-async def post_daily_digest(channel_id: str | None = None):
-    """Generate and post a daily QA status digest as a Discord embed.
-
-    Can be called externally (e.g. from a cron job) or from within the bot.
-    Posts to the configured channel (default: #dev).
-    """
-    target_channel = channel_id or _DIGEST_CHANNEL_ID
-    if not target_channel:
-        log.warning("No channel configured for daily digest")
-        return
-
-    session_id = f"discord-digest-{int(time.time())}"
-    prompt = (
-        "Run a QA health check on all configured apps. Return ONLY a JSON object "
-        "(no markdown, no code fences, no explanation) with this exact structure:\n"
-        '{"verdict": "PASS or WARN or FAIL",'
-        ' "summary": "One sentence overall status",'
-        ' "board": "Board counts as a short string, e.g. 117 done / 0 blocked / 0 active",'
-        ' "issues": "Any bugs, blocked features, or PRs needing attention. None if clean.",'
-        ' "shipped": "Brief note on recent releases. e.g. v0.92.3 shipped with 4 bug fixes"}\n\n'
-        "Rules: No emojis. No markdown tables. Keep each field under 200 chars. "
-        "If everything is healthy, issues should be \"None\"."
-    )
-
-    result = await _ask_agent(prompt, session_id)
-    if not result:
-        log.warning("Daily digest: agent returned empty response (likely auth error) -- skipping post")
-        return
-
-    # Parse structured response; fall back to plain embed on parse failure
-    try:
-        # Strip markdown code fences if the agent wrapped the JSON
-        clean = result.strip()
-        if clean.startswith("```"):
-            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
-            clean = clean.rsplit("```", 1)[0]
-        data = json_mod.loads(clean)
-        verdict = data.get("verdict", "UNKNOWN")
-        color = {"PASS": 0x22C55E, "WARN": 0xEAB308, "FAIL": 0xEF4444}.get(verdict, 0x6B7280)
-
-        fields = [
-            {"name": "Board", "value": data.get("board", "N/A"), "inline": True},
-            {"name": "Shipped", "value": data.get("shipped", "N/A"), "inline": True},
-        ]
-        issues = data.get("issues", "None")
-        if issues and issues.lower() != "none":
-            fields.append({"name": "Issues", "value": issues, "inline": False})
-
-        await _send_embed(
-            target_channel,
-            title=f"QA Report -- {verdict}",
-            description=data.get("summary", ""),
-            color=color,
-            fields=fields,
-            footer="Quinn QA Engineer",
-        )
-    except (json_mod.JSONDecodeError, KeyError, TypeError) as exc:
-        log.warning("Daily digest: could not parse structured response (%s), posting as plain embed", exc)
-        # Truncate to embed description limit (4096 chars)
-        await _send_embed(
-            target_channel,
-            title="QA Report",
-            description=result[:4000],
-            footer="Quinn QA Engineer",
-        )
-
-    log.info("Posted daily digest to channel %s", target_channel)
-
-    audit_logger.log(
-        session_id=session_id,
-        tool="daily_digest",
-        args={"channel": target_channel},
-        result_summary=result[:200],
-        duration_ms=0,
-        success=True,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Daily digest scheduler
-# ---------------------------------------------------------------------------
-
-
-_digest_scheduler_running = False
-
-
-async def _daily_digest_scheduler():
-    """Run post_daily_digest() once per day at DIGEST_HOUR_UTC."""
-    global _digest_scheduler_running
-    if _digest_scheduler_running:
-        log.debug("Daily digest scheduler already running -- skipping duplicate")
-        return
-    _digest_scheduler_running = True
-    while True:
-        now = datetime.now(timezone.utc)
-        target = now.replace(hour=_DIGEST_HOUR, minute=0, second=0, microsecond=0)
-        if target <= now:
-            target += timedelta(days=1)
-        wait_seconds = (target - now).total_seconds()
-        log.info(
-            "Next daily digest in %.1f hours (at %s)",
-            wait_seconds / 3600,
-            target.strftime("%H:%M UTC"),
-        )
-        await asyncio.sleep(wait_seconds)
-        try:
-            await post_daily_digest()
-            log.info("Daily digest posted successfully")
-        except Exception as e:
-            log.error("Daily digest failed: %s", e)
-
-
-# ---------------------------------------------------------------------------
 # Gateway WebSocket connection
 # ---------------------------------------------------------------------------
 
@@ -1070,7 +950,6 @@ async def _run_gateway():
                         if t == "READY":
                             guilds = d.get("guilds", [])
                             log.info("Gateway READY -- %d guild(s)", len(guilds))
-                            asyncio.create_task(_daily_digest_scheduler())
 
                         elif t == "MESSAGE_REACTION_ADD":
                             asyncio.create_task(_safe_dispatch(_handle_reaction, d, bot_id))
