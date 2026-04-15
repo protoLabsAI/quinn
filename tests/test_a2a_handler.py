@@ -16,6 +16,7 @@ from a2a_handler import (
     FAILED,
     SUBMITTED,
     WORKING,
+    WORLDSTATE_DELTA_MIME,
     A2ATaskStore,
     PushNotificationConfig,
     TaskRecord,
@@ -25,6 +26,8 @@ from a2a_handler import (
     _now_iso,
     _run_task_background,
     _store,
+    _task_to_response,
+    _terminal_artifact_parts,
     register_a2a_routes,
 )
 
@@ -419,6 +422,140 @@ async def test_push_reads_push_config_from_live_record():
         await _push(record)
         await asyncio.sleep(0)
         assert delivered == ["http://late.example/hook"]
+
+
+# ── Worldstate-delta-v1 artifact emission ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_store_add_delta_appends_to_record(store):
+    """Deltas accumulate under the lock so concurrent tool calls don't
+    clobber each other's entries."""
+    record = _make_record(state=WORKING)
+    await store.create(record)
+    await store.add_delta("test-task-id", {"domain": "d", "path": "x", "op": "inc", "value": 1})
+    await store.add_delta("test-task-id", {"domain": "d", "path": "y", "op": "set", "value": 42})
+    fetched = await store.get("test-task-id")
+    assert len(fetched.deltas) == 2
+    assert fetched.deltas[0]["path"] == "x"
+    assert fetched.deltas[1]["value"] == 42
+
+
+@pytest.mark.asyncio
+async def test_store_add_delta_on_missing_task_is_noop(store):
+    """No raise, just silent drop — matches update_state's contract."""
+    await store.add_delta("no-such-id", {"domain": "d", "path": "x", "op": "inc", "value": 1})
+
+
+def test_terminal_artifact_parts_text_only() -> None:
+    """A run with no observed mutations produces a single text part — no
+    empty DataPart, which would confuse consumers looking for deltas."""
+    record = _make_record(state=COMPLETED, accumulated_text="hello world")
+    parts = _terminal_artifact_parts(record)
+    assert parts == [{"kind": "text", "text": "hello world"}]
+
+
+def test_terminal_artifact_parts_text_and_delta() -> None:
+    """When deltas exist, the text part comes first and a DataPart carrying
+    the canonical MIME type follows. Ordering matters — Workstacean's
+    executor reads artifact.parts in order."""
+    record = _make_record(state=COMPLETED, accumulated_text="Bug filed: ...")
+    record.deltas.append(
+        {"domain": "protomaker_board", "path": "data.backlog_count",
+         "op": "inc", "value": 1}
+    )
+    parts = _terminal_artifact_parts(record)
+    assert len(parts) == 2
+    assert parts[0] == {"kind": "text", "text": "Bug filed: ..."}
+    assert parts[1]["kind"] == "data"
+    assert parts[1]["metadata"]["mimeType"] == WORLDSTATE_DELTA_MIME
+    assert parts[1]["data"]["deltas"] == [
+        {"domain": "protomaker_board", "path": "data.backlog_count",
+         "op": "inc", "value": 1}
+    ]
+
+
+def test_terminal_artifact_parts_empty_without_text_or_deltas() -> None:
+    """Suppresses the artifact slot entirely — callers gate on an empty
+    list to decide whether to emit an ``artifacts`` field at all."""
+    record = _make_record(state=COMPLETED)
+    assert _terminal_artifact_parts(record) == []
+
+
+def test_task_to_response_includes_delta_artifact() -> None:
+    """GET /tasks/{id} should surface the delta DataPart so pollers that
+    never subscribed to webhooks still see the observed mutation."""
+    record = _make_record(state=COMPLETED, accumulated_text="done")
+    record.deltas.append(
+        {"domain": "ci", "path": "data.blockedPRs", "op": "inc", "value": -1}
+    )
+    resp = _task_to_response(record)
+    assert "artifacts" in resp
+    parts = resp["artifacts"][0]["parts"]
+    assert any(p.get("kind") == "data"
+               and p["metadata"]["mimeType"] == WORLDSTATE_DELTA_MIME
+               for p in parts)
+
+
+@pytest.mark.asyncio
+async def test_webhook_payload_includes_delta_on_completed():
+    """Push consumers must receive deltas in the same artifact they would
+    have gotten by polling — otherwise webhook subscribers miss effects
+    that poll subscribers see."""
+    record = _make_record(state=COMPLETED, accumulated_text="ok")
+    record.deltas.append(
+        {"domain": "protomaker_board", "path": "data.backlog_count",
+         "op": "inc", "value": 1}
+    )
+    captured = {}
+
+    async def _capture_post(url, json=None, headers=None):
+        captured["json"] = json
+        resp = MagicMock(status_code=204)
+        return resp
+
+    client_cm = MagicMock()
+    client_cm.__aenter__ = AsyncMock(return_value=MagicMock(post=_capture_post))
+    client_cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("a2a_handler.httpx.AsyncClient", return_value=client_cm):
+        await _deliver_webhook(
+            record,
+            PushNotificationConfig(url="https://example.com/hook"),
+        )
+
+    parts = captured["json"]["artifact"]["parts"]
+    assert any(p.get("kind") == "data"
+               and p["metadata"]["mimeType"] == WORLDSTATE_DELTA_MIME
+               for p in parts), f"delta missing from webhook payload: {parts}"
+
+
+@pytest.mark.asyncio
+async def test_background_runner_records_delta_event():
+    """The runner must accept ``delta`` stream events and persist them on
+    the record so the terminal artifact carries them."""
+    store = A2ATaskStore()
+    record = _make_record(id="bg-delta")
+    await store.create(record)
+
+    delta = {"domain": "protomaker_board", "path": "data.backlog_count",
+             "op": "inc", "value": 1}
+    stream_fn = lambda: _mock_stream(
+        ("text", "working..."),
+        ("tool_end", "✅ file_bug → Bug filed: ..."),
+        ("delta", delta),
+        ("done", "Bug filed: feature-abc"),
+    )
+
+    async def _noop(_r):
+        pass
+
+    with patch("a2a_handler._store", store), patch("a2a_handler._push", _noop):
+        await _run_task_background("bg-delta", stream_fn)
+
+    final = await store.get("bg-delta")
+    assert final.state == COMPLETED
+    assert final.deltas == [delta]
 
 
 # ── Webhook delivery ──────────────────────────────────────────────────────────
