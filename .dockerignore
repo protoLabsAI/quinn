@@ -1,0 +1,45 @@
+# Build hygiene — what NOT to ship into /opt/quinn.
+#
+# The Dockerfile does a single `COPY . /opt/quinn/` so adding a new top-level
+# source file doesn't require a Dockerfile update (see #17 — a missing COPY
+# line on a2a_handler.py crashed the first GHCR build). Everything listed
+# here is excluded from that copy.
+
+# Git / CI
+.git/
+.gitignore
+.github/
+
+# Dev assistant / editor state
+.claude/
+.automaker/
+.infisical.json
+.vscode/
+.idea/
+
+# Tooling that doesn't belong at runtime
+Dockerfile
+.dockerignore
+README.md
+*.md
+
+# Python build artefacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.*
+
+# Tests — not needed at runtime; image stays lean
+tests/
+
+# Seccomp profile — Docker reads this on the host at runtime
+# (via docker-compose security_opt), NOT from inside the image
+seccomp-profile.json
+
+# OS junk
+.DS_Store
+Thumbs.db

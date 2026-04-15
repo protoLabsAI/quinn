@@ -35,23 +35,12 @@ RUN pip install --no-cache-dir \
     'pyjwt[crypto]'
 
 # Install Quinn
-COPY nanobot/ /opt/quinn/nanobot/
-COPY tools/ /opt/quinn/tools/
-COPY knowledge/ /opt/quinn/knowledge/
-COPY graph/ /opt/quinn/graph/
-COPY skills/ /opt/quinn/skills/
-COPY audit.py /opt/quinn/audit.py
-COPY tracing.py /opt/quinn/tracing.py
-COPY metrics.py /opt/quinn/metrics.py
-COPY chat_ui.py /opt/quinn/chat_ui.py
-COPY server.py /opt/quinn/server.py
-COPY a2a_handler.py /opt/quinn/a2a_handler.py
-COPY discord_bot.py /opt/quinn/discord_bot.py
-COPY guardrails.py /opt/quinn/guardrails.py
-COPY entrypoint.sh /opt/quinn/entrypoint.sh
-COPY config/ /opt/quinn/config/
-COPY static/ /opt/quinn/static/
-
+# Single COPY plus a .dockerignore covers everything that should ship and
+# excludes .git/, tests/, docs, and dev state. Adding a new top-level
+# source file no longer requires a Dockerfile update — avoids the class
+# of bug that crashed the first GHCR build when a2a_handler.py landed
+# without a matching COPY line.
+COPY . /opt/quinn/
 RUN chmod +x /opt/quinn/entrypoint.sh
 
 # Sandbox workspace + knowledge/audit dirs
