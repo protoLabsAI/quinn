@@ -691,6 +691,48 @@ def _build_agent_card(host: str) -> dict:
             "streaming": True,
             "pushNotifications": True,
             "stateTransitionHistory": False,
+            # protoWorkstacean extension — lets the L1 planner rank Quinn's
+            # skills against goals that target world-state selectors. Only
+            # skills with clear directional mutations are declared. Read-only
+            # skills (qa_report, board_audit, pr_review) are intentionally
+            # omitted — over-declaring effects confuses the planner.
+            #
+            # Ref: docs/extensions/effect-domain-v1.md in protoWorkstacean.
+            "extensions": [
+                {
+                    "uri": "https://protolabs.ai/a2a/ext/effect-domain-v1",
+                    "params": {
+                        "skills": {
+                            "bug_triage": {
+                                "effects": [
+                                    # Filing a confirmed bug lands a new
+                                    # feature on the protoMaker board.
+                                    {
+                                        "domain": "protomaker_board",
+                                        "path": "data.backlog_count",
+                                        "delta": 1,
+                                        "confidence": 0.9,
+                                    },
+                                ],
+                            },
+                            "security_triage": {
+                                "effects": [
+                                    # Lower confidence than bug_triage —
+                                    # low-severity findings sometimes get
+                                    # suppressed rather than filed, and
+                                    # criticals escalate to HITL first.
+                                    {
+                                        "domain": "protomaker_board",
+                                        "path": "data.backlog_count",
+                                        "delta": 1,
+                                        "confidence": 0.7,
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                },
+            ],
         },
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/markdown"],
