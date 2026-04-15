@@ -13,6 +13,7 @@ from tools.discord_feed import DiscordFeedTool
 from tools.file_bug import FileBugTool
 from tools.github_actions import GitHubActionsTool
 from tools.github_issues import GitHubIssuesTool
+from tools.manage_cron import ManageCronTool
 from tools.pr_inspector import PrInspectorTool
 from tools.release_notes import ReleaseNotesTool
 
@@ -25,6 +26,7 @@ _discord_feed = DiscordFeedTool()
 _file_bug = FileBugTool()
 _github_actions = GitHubActionsTool()
 _github_issues = GitHubIssuesTool()
+_manage_cron = ManageCronTool()
 _pr_inspector = PrInspectorTool()
 _release_notes = ReleaseNotesTool()
 
@@ -370,6 +372,46 @@ async def file_bug(
     )
 
 
+# ---------------------------------------------------------------------------
+# Manage Cron (Workstacean ceremonies)
+# ---------------------------------------------------------------------------
+
+@tool
+async def manage_cron(
+    action: str,
+    id: str = "",
+    name: str = "",
+    schedule: str = "",
+    skill: str = "",
+    targets: str = "",
+    enabled: bool | None = None,
+    notifyChannel: str = "",
+) -> str:
+    """Create, update, delete, list, or manually fire scheduled ceremonies
+    (cron jobs) on protoWorkstacean. Ceremonies invoke an agent skill on a
+    cron schedule and hot-reload within ~5s of any change.
+
+    Actions:
+    - list: List all ceremonies
+    - create: Create a ceremony (requires id, name, schedule, skill)
+    - update: Update an existing ceremony by id (omit enabled to leave its
+      current value untouched — passing enabled=True on every update would
+      silently re-enable any paused ceremony)
+    - delete: Delete a ceremony by id
+    - run: Manually fire a ceremony now (for testing — ignores schedule)
+
+    schedule is a 5-field cron expression (min hr dom mon dow), UTC.
+    targets is a comma-separated list (e.g. "quinn" or "quinn,ava"); defaults to "all".
+    """
+    kwargs: dict[str, object] = {
+        "action": action, "id": id, "name": name, "schedule": schedule,
+        "skill": skill, "targets": targets, "notifyChannel": notifyChannel,
+    }
+    if enabled is not None:
+        kwargs["enabled"] = enabled
+    return await _manage_cron.execute(**kwargs)
+
+
 def get_all_tools(qa_store=None):
     """Get all QA tools as LangChain tool objects."""
     return [
@@ -380,6 +422,7 @@ def get_all_tools(qa_store=None):
         file_bug,
         github_actions,
         github_issues,
+        manage_cron,
         pr_inspector,
         release_notes,
         create_qa_memory_tool(qa_store),
