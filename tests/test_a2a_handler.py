@@ -969,3 +969,184 @@ async def test_agent_card_route():
     assert resp.status_code == 200
     assert resp.json()["capabilities"]["streaming"] is True
     assert resp.json()["capabilities"]["pushNotifications"] is True
+
+
+# ── Spec-compliant JSON-RPC method names ──────────────────────────────────────
+# The @a2a-js/sdk Client sends these exact method names on every call. Earlier
+# only message/send + message/sendStream were routed, so streaming, polling,
+# cancel, and push-config were all broken for SDK clients with -32601. Guard
+# each one.
+
+
+async def _rpc(client, method, params=None, rpc_id=1):
+    resp = await client.post("/a2a", json={
+        "jsonrpc": "2.0", "id": rpc_id, "method": method,
+        "params": params or {},
+    })
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_rpc_message_stream_returns_sse_not_method_not_found():
+    """#23-era bug: SDK sent method 'message/stream' (spec name), handler
+    only accepted 'message/sendStream', so every streaming call returned
+    -32601 and the SDK wrapped it as an 'Invalid response Content-Type'
+    error. Lock the spec method name."""
+    app, _ = _make_test_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await client.post("/a2a", json={
+            "jsonrpc": "2.0", "id": 1, "method": "message/stream",
+            "params": {"message": {"parts": [{"kind": "text", "text": "hi"}]}},
+        })
+    assert resp.status_code == 200
+    # SSE stream, not a JSON-RPC error
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    body = resp.text
+    assert "data:" in body
+    # First SSE frame carries the submitted task receipt
+    assert '"state": "submitted"' in body or '"state":"submitted"' in body
+
+
+@pytest.mark.asyncio
+async def test_rpc_sendStream_alias_still_works():
+    """Legacy protoPen-era method name. Keep it accepted so nothing that
+    still sends the old name silently breaks."""
+    app, _ = _make_test_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await client.post("/a2a", json={
+            "jsonrpc": "2.0", "id": 1, "method": "message/sendStream",
+            "params": {"message": {"parts": [{"kind": "text", "text": "hi"}]}},
+        })
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+
+
+@pytest.mark.asyncio
+async def test_rpc_tasks_get_returns_task_record():
+    app, _ = _make_test_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        # Submit, then fetch via JSON-RPC tasks/get (NOT the REST path).
+        send = await _rpc(client, "message/send", {
+            "message": {"parts": [{"kind": "text", "text": "hi"}]},
+        })
+        task_id = send.json()["result"]["id"]
+        resp = await _rpc(client, "tasks/get", {"id": task_id}, rpc_id=2)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == 2
+    assert body["result"]["id"] == task_id
+    assert body["result"]["status"]["state"] in {"submitted", "working", "completed"}
+
+
+@pytest.mark.asyncio
+async def test_rpc_tasks_get_unknown_returns_task_not_found_error():
+    app, _ = _make_test_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await _rpc(client, "tasks/get", {"id": "no-such-task"})
+    body = resp.json()
+    assert "error" in body
+    # A2A spec uses -32001 for "task not found"
+    assert body["error"]["code"] == -32001
+
+
+@pytest.mark.asyncio
+async def test_rpc_tasks_cancel_returns_canceled_record():
+    app, _ = _make_test_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        send = await _rpc(client, "message/send", {
+            "message": {"parts": [{"kind": "text", "text": "hi"}]},
+        })
+        task_id = send.json()["result"]["id"]
+        resp = await _rpc(client, "tasks/cancel", {"id": task_id}, rpc_id=2)
+    body = resp.json()
+    # Either we cancelled it in time (result w/ canceled state) or the
+    # fake stream already finished (409-ish error). Both are spec-valid.
+    if "result" in body:
+        assert body["result"]["status"]["state"] == "canceled"
+    else:
+        assert body["error"]["code"] == -32002  # "task already terminal"
+
+
+@pytest.mark.asyncio
+async def test_rpc_push_notification_config_roundtrip():
+    """set → get → list → delete → get-again round-trip via JSON-RPC.
+    Exercises every tasks/pushNotificationConfig/* method the SDK emits."""
+    app, _ = _make_test_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        send = await _rpc(client, "message/send", {
+            "message": {"parts": [{"kind": "text", "text": "hi"}]},
+        })
+        task_id = send.json()["result"]["id"]
+
+        # set — 8.8.8.8 is public and passes the SSRF guard
+        r = await _rpc(client, "tasks/pushNotificationConfig/set", {
+            "taskId": task_id,
+            "pushNotificationConfig": {"url": "https://8.8.8.8/hook"},
+        }, rpc_id=2)
+        assert r.status_code == 200 and "result" in r.json()
+        cfg_id = r.json()["result"]["pushNotificationConfig"]["id"]
+
+        # get returns the config
+        r = await _rpc(client, "tasks/pushNotificationConfig/get",
+                       {"taskId": task_id}, rpc_id=3)
+        assert r.json()["result"]["pushNotificationConfig"]["id"] == cfg_id
+
+        # list returns [cfg]
+        r = await _rpc(client, "tasks/pushNotificationConfig/list",
+                       {"taskId": task_id}, rpc_id=4)
+        assert len(r.json()["result"]) == 1
+
+        # delete clears; subsequent get returns null
+        r = await _rpc(client, "tasks/pushNotificationConfig/delete",
+                       {"taskId": task_id}, rpc_id=5)
+        assert r.json()["result"] is None
+        r = await _rpc(client, "tasks/pushNotificationConfig/get",
+                       {"taskId": task_id}, rpc_id=6)
+        assert r.json()["result"] is None
+
+
+@pytest.mark.asyncio
+async def test_rpc_push_notification_config_set_rejects_unsafe_url():
+    """SSRF guard applies to the JSON-RPC entry point, not just the
+    REST alias — otherwise a spec-compliant SDK client bypasses it."""
+    app, _ = _make_test_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        send = await _rpc(client, "message/send", {
+            "message": {"parts": [{"kind": "text", "text": "hi"}]},
+        })
+        task_id = send.json()["result"]["id"]
+        r = await _rpc(client, "tasks/pushNotificationConfig/set", {
+            "taskId": task_id,
+            "pushNotificationConfig": {"url": "http://169.254.169.254/latest"},
+        }, rpc_id=2)
+    body = r.json()
+    assert "error" in body
+    assert body["error"]["code"] == -32602
+
+
+@pytest.mark.asyncio
+async def test_rpc_unknown_method_returns_method_not_found():
+    """Unknown methods should still surface as a clean -32601; locks the
+    dispatch fallback so we don't accidentally 500 on a typo."""
+    app, _ = _make_test_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        r = await _rpc(client, "some/bogus/method")
+    body = r.json()
+    assert body["error"]["code"] == -32601
+    assert "some/bogus/method" in body["error"]["message"]
