@@ -17,6 +17,7 @@ from a2a_handler import (
     SUBMITTED,
     WORKING,
     WORLDSTATE_DELTA_MIME,
+    _TERMINAL,
     A2ATaskStore,
     PushNotificationConfig,
     TaskRecord,
@@ -28,6 +29,7 @@ from a2a_handler import (
     _store,
     _task_to_response,
     _terminal_artifact_parts,
+    _watch_task,
     register_a2a_routes,
 )
 
@@ -624,6 +626,178 @@ def test_build_artifact_event():
     assert evt["artifact"]["parts"][0]["text"] == "some output"
     assert evt["last_chunk"] is True
     assert evt["append"] is True
+
+
+# ── _watch_task: shared SSE consumer ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_watch_task_yields_snapshot_then_terminates():
+    """A terminal task must emit one status frame and exit — no hanging."""
+    store = A2ATaskStore()
+    record = _make_record(id="done", state=COMPLETED, accumulated_text="final")
+    await store.create(record)
+    with patch("a2a_handler._store", store):
+        kinds = []
+        async for kind, r, payload in _watch_task("done", start_text_len=0):
+            kinds.append((kind, payload))
+    # Initial snapshot: status + text_delta (since accumulated > start_len)
+    assert kinds == [("status", None), ("text_delta", "final")]
+
+
+@pytest.mark.asyncio
+async def test_watch_task_emits_delta_not_full_text():
+    """The regression at the heart of #13 item 2: on reconnect, the
+    watcher must emit only the new suffix — never the full accumulated_text.
+
+    The watcher naturally coalesces rapid successive updates (desirable
+    for SSE chatter), so the test yields aggressively between updates to
+    guarantee the watcher visits each intermediate state and that each
+    visit emits only the NEW suffix, not the full text."""
+    store = A2ATaskStore()
+    record = _make_record(id="mid", state=WORKING, accumulated_text="abcdefgh")
+    await store.create(record)
+
+    async def _reader():
+        deltas = []
+        with patch("a2a_handler._store", store):
+            async for kind, r, payload in _watch_task("mid", start_text_len=5):
+                if kind == "text_delta":
+                    deltas.append(payload)
+                if kind == "status" and r is not None and r.state in _TERMINAL:
+                    return deltas
+        return deltas
+
+    task = asyncio.create_task(_reader())
+    # Yield repeatedly so the reader runs through snapshot and parks on
+    # the first update event.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    # First append — let the reader wake and consume before the next one.
+    await store.update_state("mid", WORKING, accumulated_text="abcdefghIJKL")
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    # Terminal.
+    await store.update_state("mid", COMPLETED, accumulated_text="abcdefghIJKL")
+    deltas = await asyncio.wait_for(task, timeout=2.0)
+    # Each update yields only the NEW suffix — never the full text.
+    assert deltas == ["fgh", "IJKL"]
+
+
+@pytest.mark.asyncio
+async def test_watch_task_multiple_subscribers_each_see_terminal():
+    """Two consumers on the same task both receive a terminal status frame.
+    Exercises the rotate-event pattern: each update sets the old event and
+    installs a fresh one, so both waiters wake up in lock-step."""
+    store = A2ATaskStore()
+    record = _make_record(id="multi", state=WORKING)
+    await store.create(record)
+
+    terminal_states: list[str] = []
+
+    async def _consumer():
+        last_state = None
+        async for kind, r, _payload in _watch_task("multi", start_text_len=0):
+            if kind == "status" and r is not None:
+                last_state = r.state
+                if last_state in _TERMINAL:
+                    break
+        terminal_states.append(last_state)
+
+    # Single outer patch — unittest.mock.patch is not safe to stack under
+    # concurrent asyncio tasks (restore semantics race on exit).
+    with patch("a2a_handler._store", store):
+        a = asyncio.create_task(_consumer())
+        b = asyncio.create_task(_consumer())
+        # Give both consumers time to emit their snapshot and park on the
+        # rotating update_event before the test triggers the transition.
+        await asyncio.sleep(0.05)
+        await store.update_state("multi", COMPLETED)
+        await asyncio.wait_for(asyncio.gather(a, b), timeout=2.0)
+    assert terminal_states == [COMPLETED, COMPLETED]
+
+
+@pytest.mark.asyncio
+async def test_background_runner_persists_tool_status_message():
+    """tool_start / tool_end payloads land on record.last_status_message so
+    :subscribe reconnects can see the most recent tool message — the
+    producer's in-process event stream is no longer the only source."""
+    store = A2ATaskStore()
+    record = _make_record(id="tooltrack")
+    await store.create(record)
+
+    stream_fn = lambda: _mock_stream(
+        ("text", "starting"),
+        ("tool_start", "🔧 file_bug: draft"),
+        ("tool_end", "✅ file_bug → Bug filed: ..."),
+        ("done", "starting"),
+    )
+
+    async def _noop(_r):
+        pass
+
+    with patch("a2a_handler._store", store), patch("a2a_handler._push", _noop):
+        await _run_task_background("tooltrack", stream_fn)
+
+    final = await store.get("tooltrack")
+    # Terminal transitions clear the status message — subscribers on a
+    # completed task shouldn't see a stale tool ping.
+    assert final.state == COMPLETED
+    assert final.last_status_message is None
+
+
+@pytest.mark.asyncio
+async def test_stream_producer_survives_consumer_cancellation():
+    """The biggest guarantee of the SSE refactor: SSE connection drop does
+    NOT kill the LangGraph producer. Verified by simulating a consumer
+    disconnect mid-run and asserting the bg task still completes."""
+    store = A2ATaskStore()
+
+    async def _slow_stream(_text, _ctx):
+        yield ("text", "partial")
+        await asyncio.sleep(0.05)
+        yield ("text", " more")
+        await asyncio.sleep(0.05)
+        yield ("done", "partial more")
+
+    async def _noop_push(_r):
+        pass
+
+    with patch("a2a_handler._store", store), patch("a2a_handler._push", _noop_push):
+        # Manually seed + spawn the bg runner (mimics _submit_task)
+        task_id = "drop-test"
+        now = _now_iso()
+        record = TaskRecord(
+            id=task_id, context_id="c", state=SUBMITTED,
+            created_at=now, updated_at=now, message_text="t",
+        )
+        await store.create(record)
+        bg = asyncio.create_task(
+            _run_task_background(task_id, lambda: _slow_stream("t", "c"))
+        )
+        record._bg_task = bg
+
+        # Simulate an SSE consumer that attaches, reads one frame, then
+        # "disconnects" by closing the generator. Matches what FastAPI
+        # does to an SSE StreamingResponse when the HTTP connection closes.
+        async def _dropping_consumer():
+            gen = _watch_task(task_id, 0)
+            await gen.__anext__()         # read one frame then drop
+            await gen.aclose()            # close generator cleanly
+            return "dropped"
+
+        result = await asyncio.wait_for(_dropping_consumer(), timeout=1.0)
+        assert result == "dropped"
+
+        # BG task should STILL complete — that's the whole point of decoupling.
+        # Success is measured by the task landing in COMPLETED state, which
+        # only happens if the producer ran all the way through "done".
+        await asyncio.wait_for(bg, timeout=3.0)
+        final = await store.get(task_id)
+        assert final.state == COMPLETED
+        assert final.accumulated_text == "partial more"
 
 
 # ── Route integration (FastAPI ASGI test client) ──────────────────────────────

@@ -79,6 +79,12 @@ class TaskRecord:
     accumulated_text: str = ""
     error_message: str | None = None
     push_config: PushNotificationConfig | None = None
+    # Most recent tool_start / tool_end status message, e.g. "🔧 file_bug:…"
+    # or "✅ file_bug → …". Surfaced in the status frames that ``_watch_task``
+    # emits so consumers (SSE clients, :subscribe reconnects) see tool
+    # progress without being coupled to the producer's in-process event
+    # stream. Cleared to None on terminal transitions.
+    last_status_message: str | None = None
     # Observed world-state mutations to emit on the terminal artifact under
     # the worldstate-delta-v1 MIME type. Populated during the run whenever a
     # tool with known effects succeeds (see _chat_langgraph_stream). Shape:
@@ -131,6 +137,7 @@ class A2ATaskStore:
         state: str,
         accumulated_text: str | None = None,
         error: str | None = None,
+        status_message: str | None = None,
     ) -> TaskRecord | None:
         async with self._lock:
             record = self._tasks.get(task_id)
@@ -142,6 +149,12 @@ class A2ATaskStore:
                 record.accumulated_text = accumulated_text
             if error is not None:
                 record.error_message = error
+            if status_message is not None:
+                record.last_status_message = status_message
+            # Terminal transitions clear the status message so post-run
+            # subscribers see the final state cleanly, not a stale tool ping.
+            if state in _TERMINAL:
+                record.last_status_message = None
             old_event = record._update_event
             record._update_event = asyncio.Event()
         # Wake subscribers outside the lock so they can re-acquire it
@@ -306,16 +319,63 @@ def _build_status_event(record: TaskRecord) -> dict:
             "role": "agent",
             "parts": [{"kind": "text", "text": record.error_message}],
         }
+    elif record.last_status_message and record.state not in _TERMINAL:
+        # Surface tool_start / tool_end messages to SSE subscribers. Cleared
+        # on terminal transitions so consumers see the final state cleanly.
+        evt["status"]["message"] = {
+            "role": "agent",
+            "parts": [{"kind": "text", "text": record.last_status_message}],
+        }
     return evt
 
 
-def _build_artifact_event(record: TaskRecord, *, last_chunk: bool) -> dict:
+def _build_artifact_event(
+    record: TaskRecord,
+    *,
+    text: str | None = None,
+    append: bool = True,
+    last_chunk: bool,
+) -> dict:
+    """Build an artifact update event frame.
+
+    Defaults match the historical behaviour (full record.accumulated_text,
+    append=True) so existing callers remain correct. Consumers that want to
+    emit an incremental delta should pass ``text=<delta>`` and
+    ``append=True``; callers that are replacing the full artifact (e.g.
+    initial snapshot on :subscribe reconnect, terminal frame) should pass
+    ``text=<full>`` and ``append=False``.
+
+    On terminal frames with accumulated worldstate deltas, the full terminal
+    artifact (text + DataPart) is emitted via ``_terminal_artifact_parts``
+    instead — see ``_build_terminal_artifact_event``.
+    """
+    body_text = text if text is not None else record.accumulated_text
     return {
         "task_id": record.id,
         "context_id": record.context_id,
-        "artifact": {"parts": [{"kind": "text", "text": record.accumulated_text}]},
-        "append": True,
+        "artifact": {"parts": [{"kind": "text", "text": body_text}]},
+        "append": append,
         "last_chunk": last_chunk,
+    }
+
+
+def _build_terminal_artifact_event(record: TaskRecord) -> dict:
+    """Terminal artifact: full text + worldstate-delta DataPart if any.
+
+    Used on COMPLETED frames for both the streaming and subscribe paths so
+    consumers see the authoritative final artifact (``append: false``,
+    ``last_chunk: true``) with every accumulated delta attached.
+    """
+    return {
+        "task_id": record.id,
+        "context_id": record.context_id,
+        "artifact": {
+            "parts": _terminal_artifact_parts(record),
+            "append": False,
+            "last_chunk": True,
+        },
+        "append": False,
+        "last_chunk": True,
     }
 
 
@@ -497,8 +557,14 @@ async def _run_task_background(
                 await _store.update_state(task_id, WORKING, accumulated_text=accumulated)
 
             elif event_type in ("tool_start", "tool_end"):
-                # Status update only — no new artifact text
-                await _store.update_state(task_id, WORKING, accumulated_text=accumulated)
+                # Status update only — preserve the tool message on the record
+                # so SSE subscribers see it (both the initial message/sendStream
+                # consumer and any :subscribe reconnect).
+                await _store.update_state(
+                    task_id, WORKING,
+                    accumulated_text=accumulated,
+                    status_message=payload,
+                )
 
             elif event_type == "delta":
                 # Worldstate-delta emitted by a tool that mutated shared state.
@@ -536,6 +602,11 @@ async def _run_task_background(
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
+# How long a subscriber blocks on the rotating _update_event before yielding
+# a keepalive comment. Tuned to stay comfortably below typical reverse-proxy
+# idle timeouts (nginx default: 60s) while minimising chatter.
+_SSE_KEEPALIVE_TIMEOUT_S = 25
+
 
 def _sse(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
@@ -543,6 +614,84 @@ def _sse(data: dict) -> str:
 
 def _sse_rpc(rpc_id: Any, result: dict) -> str:
     return _sse({"jsonrpc": "2.0", "id": rpc_id, "result": result})
+
+
+# ── Shared SSE consumer ───────────────────────────────────────────────────────
+
+
+async def _watch_task(
+    task_id: str,
+    start_text_len: int = 0,
+) -> AsyncGenerator[tuple[str, TaskRecord | None, str | None], None]:
+    """Yield change notifications for a running task until it terminates.
+
+    This is the shared consumer behind both ``message/sendStream`` and
+    ``:subscribe``. The producer (``_run_task_background``) runs independently
+    as ``record._bg_task``; the consumer only reads the store and awaits the
+    rotating ``_update_event``. Dropping the SSE connection no longer stops
+    the producer — a reconnect via ``:subscribe`` resumes where the previous
+    connection left off.
+
+    Yield tuples are ``(kind, record, payload)`` where kind is one of:
+      - ``"status"``: state transition or tool message. payload is None;
+        consumers format via ``_build_status_event(record)``.
+      - ``"text_delta"``: ``accumulated_text`` grew. payload is the new
+        suffix only — never the full accumulated text — so reconnects do
+        not duplicate content on the wire.
+      - ``"keepalive"``: timed out waiting for an update; record is None.
+        Consumers should emit ``": keepalive\\n\\n"`` to keep the proxy happy.
+
+    ``start_text_len`` is the length of ``accumulated_text`` the client has
+    already seen. First-connect callers pass 0. :subscribe reconnects pass
+    ``len(record.accumulated_text)`` so only genuinely-new suffix text is
+    emitted. Callers that want to replay the full artifact on reconnect
+    (initial snapshot UX) emit that frame themselves and then start the
+    watcher at ``start_text_len = len(record.accumulated_text)``.
+
+    Terminates when the task is deleted or reaches a terminal state. The
+    final status frame is always yielded before return.
+    """
+    record = await _store.get(task_id)
+    if record is None:
+        return
+
+    last_sent_len = start_text_len
+
+    # Emit the current snapshot first so (re)connecting clients see the
+    # state of the world before blocking on the next update.
+    yield ("status", record, None)
+    if record.accumulated_text and len(record.accumulated_text) > last_sent_len:
+        delta = record.accumulated_text[last_sent_len:]
+        last_sent_len = len(record.accumulated_text)
+        yield ("text_delta", record, delta)
+
+    if record.state in _TERMINAL:
+        return
+
+    while True:
+        r = await _store.get(task_id)
+        if r is None:
+            return
+
+        next_event = r._update_event
+        try:
+            await asyncio.wait_for(next_event.wait(), timeout=_SSE_KEEPALIVE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            yield ("keepalive", None, None)
+            continue
+
+        r = await _store.get(task_id)
+        if r is None:
+            return
+
+        yield ("status", r, None)
+        if r.accumulated_text and len(r.accumulated_text) > last_sent_len:
+            delta = r.accumulated_text[last_sent_len:]
+            last_sent_len = len(r.accumulated_text)
+            yield ("text_delta", r, delta)
+
+        if r.state in _TERMINAL:
+            return
 
 
 # ── Auth helper ───────────────────────────────────────────────────────────────
@@ -626,159 +775,95 @@ def register_a2a_routes(
         push_config: PushNotificationConfig | None,
         rpc_id: Any = None,
     ):
-        """Async generator: creates a task and streams its events as SSE."""
-        _store.start_cleanup()
-        task_id = str(uuid4())
-        now = _now_iso()
-        record = TaskRecord(
-            id=task_id,
-            context_id=context_id,
-            state=SUBMITTED,
-            created_at=now,
-            updated_at=now,
-            message_text=text,
-            push_config=push_config,
-        )
-        await _store.create(record)
+        """Submit a new task and stream its lifecycle as JSON-RPC SSE frames.
 
-        # Frame 0: submitted — client gets task_id before LangGraph starts
+        The producer (``_run_task_background``) runs as ``record._bg_task``
+        independently of this generator — if the SSE connection drops, work
+        continues and the client can reattach via ``:subscribe``.
+
+        Emits incremental text deltas only (``append: true``) for the
+        streaming window, and the authoritative terminal artifact (full
+        text + worldstate-delta DataPart, ``append: false``) on the terminal
+        frame. Reconnects see the pre-disconnect text via ``:subscribe``'s
+        snapshot, then continue from there.
+        """
+        record = await _submit_task(text, context_id, push_config)
+        task_id = record.id
+
+        # Frame 0: submitted — client gets task_id before the producer starts.
+        # Watcher will emit the next status frame (WORKING) once the bg task
+        # transitions, so there's no duplication with the watcher's first
+        # snapshot.
         yield _sse_rpc(
             rpc_id,
             {
                 "id": task_id,
                 "contextId": context_id,
-                "status": {"state": SUBMITTED, "timestamp": now},
+                "status": {"state": SUBMITTED, "timestamp": record.created_at},
             },
         )
 
-        accumulated = ""
-        last_emitted_len = 0
-
         try:
-            await _store.update_state(task_id, WORKING)
-            working_record = await _store.get(task_id)
-            if working_record is not None:
-                await _push(working_record)
-
-            yield _sse_rpc(
-                rpc_id,
-                {
-                    "id": task_id,
-                    "contextId": context_id,
-                    "status": {"state": WORKING, "timestamp": _now_iso()},
-                },
-            )
-
-            async for event_type, payload in chat_stream_fn_factory(text, context_id):
-                r = await _store.get(task_id)
-                if r and r._cancel_event.is_set():
-                    canceled = await _store.update_state(task_id, CANCELED)
-                    if canceled is not None:
-                        await _push(canceled)
-                    yield _sse_rpc(
-                        rpc_id,
-                        {
-                            "id": task_id,
-                            "contextId": context_id,
-                            "status": {"state": CANCELED, "timestamp": _now_iso()},
-                        },
-                    )
+            async for kind, r, payload in _watch_task(task_id, start_text_len=0):
+                if kind == "keepalive":
+                    yield ": keepalive\n\n"
+                    continue
+                if r is None:
                     return
 
-                if event_type == "text":
-                    accumulated += payload
-                    await _store.update_state(task_id, WORKING, accumulated_text=accumulated)
-                    # Only emit artifact frame when text actually grew
-                    if len(accumulated) > last_emitted_len:
-                        last_emitted_len = len(accumulated)
+                if kind == "status":
+                    base = {"state": r.state, "timestamp": r.updated_at}
+                    if r.error_message:
+                        base["message"] = {
+                            "role": "agent",
+                            "parts": [{"kind": "text", "text": r.error_message}],
+                        }
+                    elif r.last_status_message and r.state not in _TERMINAL:
+                        base["message"] = {
+                            "role": "agent",
+                            "parts": [{"kind": "text", "text": r.last_status_message}],
+                        }
+                    frame: dict[str, Any] = {
+                        "id": task_id,
+                        "contextId": context_id,
+                        "status": base,
+                    }
+                    if r.state == COMPLETED:
+                        # Terminal frame carries the full artifact (text +
+                        # worldstate-delta DataPart) as append=false so
+                        # clients replace whatever incremental text they
+                        # already assembled.
+                        frame["artifacts"] = [{
+                            "parts": _terminal_artifact_parts(r),
+                            "append": False,
+                            "last_chunk": True,
+                        }]
+                    yield _sse_rpc(rpc_id, frame)
+
+                elif kind == "text_delta":
+                    # Mid-run delta: just the new suffix, append=true. Only
+                    # emitted when the task is still WORKING — terminal
+                    # deltas roll into the status frame's artifacts list.
+                    if r.state not in _TERMINAL and payload:
                         yield _sse_rpc(
                             rpc_id,
                             {
                                 "id": task_id,
                                 "contextId": context_id,
                                 "status": {"state": WORKING},
-                                "artifacts": [
-                                    {"parts": [{"kind": "text", "text": payload}], "append": True, "last_chunk": False}
-                                ],
+                                "artifacts": [{
+                                    "parts": [{"kind": "text", "text": payload}],
+                                    "append": True,
+                                    "last_chunk": False,
+                                }],
                             },
                         )
-
-                elif event_type in ("tool_start", "tool_end"):
-                    await _store.update_state(task_id, WORKING, accumulated_text=accumulated)
-                    yield _sse_rpc(
-                        rpc_id,
-                        {
-                            "id": task_id,
-                            "contextId": context_id,
-                            "status": {
-                                "state": WORKING,
-                                "timestamp": _now_iso(),
-                                "message": {"role": "agent", "parts": [{"kind": "text", "text": payload}]},
-                            },
-                        },
-                    )
-
-                elif event_type == "delta":
-                    # Worldstate-delta: accumulated on the record, emitted on
-                    # the terminal artifact's DataPart. No mid-run SSE frame
-                    # — the Workstacean executor reads deltas from the final
-                    # Task artifacts, not status updates.
-                    if isinstance(payload, dict):
-                        await _store.add_delta(task_id, payload)
-
-                elif event_type == "done":
-                    final_text = payload or accumulated
-                    r = await _store.update_state(task_id, COMPLETED, accumulated_text=final_text)
-                    if r is not None:
-                        await _push(r)
-                    yield _sse_rpc(
-                        rpc_id,
-                        {
-                            "id": task_id,
-                            "contextId": context_id,
-                            "status": {"state": COMPLETED, "timestamp": _now_iso()},
-                            "artifacts": [
-                                {"parts": _terminal_artifact_parts(r) if r else [{"kind": "text", "text": final_text}], "append": False, "last_chunk": True}
-                            ],
-                        },
-                    )
-                    return
-
-                elif event_type == "error":
-                    r = await _store.update_state(task_id, FAILED, error=payload)
-                    if r is not None:
-                        await _push(r)
-                    yield _sse_rpc(
-                        rpc_id,
-                        {
-                            "id": task_id,
-                            "contextId": context_id,
-                            "status": {
-                                "state": FAILED,
-                                "timestamp": _now_iso(),
-                                "message": {"role": "agent", "parts": [{"kind": "text", "text": payload}]},
-                            },
-                        },
-                    )
-                    return
-
-        except Exception as exc:
-            logger.exception("[a2a] stream task %s crashed", task_id)
-            r = await _store.update_state(task_id, FAILED, error=str(exc))
-            if r is not None:
-                await _push(r)
-            yield _sse_rpc(
-                rpc_id,
-                {
-                    "id": task_id,
-                    "contextId": context_id,
-                    "status": {
-                        "state": FAILED,
-                        "timestamp": _now_iso(),
-                        "message": {"role": "agent", "parts": [{"kind": "text", "text": str(exc)}]},
-                    },
-                },
-            )
+        except asyncio.CancelledError:
+            # The HTTP connection closed (client disconnect). DO NOT cancel
+            # the background task — it continues running, and :subscribe
+            # can reattach. Just stop emitting.
+            logger.info("[a2a] stream consumer for %s disconnected; bg task continues", task_id)
+            raise
 
     # ── POST /a2a  (JSON-RPC 2.0 — legacy, backwards-compat) ─────────────────
 
@@ -886,43 +971,52 @@ def register_a2a_routes(
             raise HTTPException(404, f"Task not found: {task_id}")
 
         async def _sse_gen():
-            # Emit current snapshot immediately on (re)connect
-            r = await _store.get(task_id)
-            if r is None:
+            # Initial snapshot: emit whatever text is already on the record as
+            # an append=False replacement frame, then let _watch_task continue
+            # from there with append=True deltas only. This gives reconnecting
+            # clients one full payload + future incrementals — no duplication.
+            snapshot = await _store.get(task_id)
+            if snapshot is None:
                 return
-            yield _sse(_build_status_event(r))
-            if r.accumulated_text:
-                yield _sse(_build_artifact_event(r, last_chunk=r.state in _TERMINAL))
-            if r.state in _TERMINAL:
-                return
+            snapshot_len = len(snapshot.accumulated_text)
+            if snapshot.accumulated_text:
+                yield _sse(_build_artifact_event(
+                    snapshot,
+                    text=snapshot.accumulated_text,
+                    append=False,
+                    last_chunk=snapshot.state in _TERMINAL,
+                ))
 
-            # Wait for updates until terminal
-            last_text_len = len(r.accumulated_text)
-            while True:
-                r = await _store.get(task_id)
-                if r is None or r.state in _TERMINAL:
-                    if r:
-                        yield _sse(_build_status_event(r))
-                        if r.accumulated_text and len(r.accumulated_text) > last_text_len:
-                            yield _sse(_build_artifact_event(r, last_chunk=True))
-                    return
+            try:
+                async for kind, r, payload in _watch_task(
+                    task_id, start_text_len=snapshot_len,
+                ):
+                    if kind == "keepalive":
+                        yield ": keepalive\n\n"
+                        continue
+                    if r is None:
+                        return
 
-                next_event = r._update_event
-                try:
-                    await asyncio.wait_for(next_event.wait(), timeout=25)
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-                    continue
+                    if kind == "status":
+                        if r.state == COMPLETED:
+                            # Terminal: authoritative full artifact (text +
+                            # worldstate-delta DataPart) as append=false.
+                            yield _sse(_build_status_event(r))
+                            yield _sse(_build_terminal_artifact_event(r))
+                        else:
+                            yield _sse(_build_status_event(r))
 
-                r = await _store.get(task_id)
-                if r is None:
-                    return
-                yield _sse(_build_status_event(r))
-                if r.accumulated_text and len(r.accumulated_text) > last_text_len:
-                    last_text_len = len(r.accumulated_text)
-                    yield _sse(_build_artifact_event(r, last_chunk=r.state in _TERMINAL))
-                if r.state in _TERMINAL:
-                    return
+                    elif kind == "text_delta":
+                        if r.state not in _TERMINAL and payload:
+                            yield _sse(_build_artifact_event(
+                                r, text=payload, append=True, last_chunk=False,
+                            ))
+            except asyncio.CancelledError:
+                logger.info(
+                    "[a2a] subscribe consumer for %s disconnected; bg task continues",
+                    task_id,
+                )
+                raise
 
         return StreamingResponse(_sse_gen(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
