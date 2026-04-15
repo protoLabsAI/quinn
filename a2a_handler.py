@@ -148,6 +148,29 @@ class A2ATaskStore:
             record._bg_task.cancel()
         return True
 
+    async def cancel_if_not_terminal(self, task_id: str) -> TaskRecord | None:
+        """Atomically cancel a task iff it's not already terminal.
+
+        Replaces the non-atomic get-state-then-update sequence in
+        ``_cancel_task``: a runner could race between the check and the write
+        and transition to COMPLETED while the caller assumed it was still
+        cancellable. Returns the updated record, or None if the task was
+        missing or already terminal (signal: HTTP 409 from the caller).
+        """
+        async with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None or record.state in _TERMINAL:
+                return None
+            record.state = CANCELED
+            record.updated_at = _now_iso()
+            old_event = record._update_event
+            record._update_event = asyncio.Event()
+        old_event.set()
+        record._cancel_event.set()
+        if record._bg_task and not record._bg_task.done():
+            record._bg_task.cancel()
+        return record
+
     async def cleanup_expired(self, ttl_seconds: int = _DEFAULT_TERMINAL_TTL_S) -> int:
         """Remove terminal tasks whose ``updated_at`` is older than ttl_seconds.
 
@@ -257,13 +280,75 @@ def _extract_text_and_context(message: dict, context_id: str = "") -> tuple[str,
     return text, context_id
 
 
+def _is_safe_webhook_url(url: str) -> bool:
+    """Reject unsafe webhook targets before we accept a push config.
+
+    Defends against SSRF: a client supplying http://169.254.169.254/... or
+    http://10.0.0.1/... as a webhook would have Quinn POST task payloads to
+    internal cloud metadata, adjacent private services, or the loopback
+    device. One-time resolution is not a full defence against DNS rebinding,
+    but it closes the trivial "just give it a RFC1918 literal" vector.
+
+    Accepts:  http/https URLs to globally-routable IPs.
+    Rejects:  non-http(s) schemes, loopback, link-local, private (RFC1918),
+              multicast, reserved, and unresolvable hostnames.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+
+    # If the hostname is already a literal IP, check it directly; otherwise
+    # resolve once and check every returned address (multi-A / AAAA).
+    candidates: list[str] = []
+    try:
+        ipaddress.ip_address(host)
+        candidates = [host]
+    except ValueError:
+        try:
+            # getaddrinfo returns (family, type, proto, canonname, sockaddr);
+            # sockaddr[0] is the IP for both AF_INET and AF_INET6.
+            candidates = [info[4][0] for info in socket.getaddrinfo(host, None)]
+        except socket.gaierror:
+            return False
+
+    for addr in candidates:
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return False
+        if (
+            ip.is_loopback
+            or ip.is_link_local
+            or ip.is_private
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return False
+    return True
+
+
 def _parse_push_config(configuration: dict) -> PushNotificationConfig | None:
     cfg = (configuration or {}).get("pushNotificationConfig") or (configuration or {}).get("taskPushNotificationConfig")
     if not cfg or not cfg.get("url"):
         return None
+    url = cfg["url"]
+    if not _is_safe_webhook_url(url):
+        logger.warning("[a2a] rejected unsafe webhook url: %s", url)
+        return None
     auth = cfg.get("authentication") or {}
     return PushNotificationConfig(
-        url=cfg["url"],
+        url=url,
         token=auth.get("credentials"),
         id=cfg.get("id", str(uuid4())),
     )
@@ -307,6 +392,14 @@ async def _deliver_webhook(record: TaskRecord, push_config: PushNotificationConf
     logger.error("[a2a] webhook failed after %d attempts: %s", len(backoff), push_config.url)
 
 
+# Strong references to in-flight webhook delivery tasks. Without this the
+# asyncio loop holds only weak references (Python 3.11+ docs warn about this
+# explicitly) and a pending delivery can be garbage-collected mid-retry,
+# silently dropping the status transition a caller registered a webhook to
+# receive.
+_pending_webhook_tasks: set[asyncio.Task] = set()
+
+
 async def _push(record: TaskRecord) -> None:
     """Fire webhook delivery for *record* if a push config is currently
     registered on it.
@@ -318,7 +411,9 @@ async def _push(record: TaskRecord) -> None:
     """
     cfg = record.push_config
     if cfg and record.state in _TERMINAL | {WORKING}:
-        asyncio.create_task(_deliver_webhook(record, cfg))
+        task = asyncio.create_task(_deliver_webhook(record, cfg))
+        _pending_webhook_tasks.add(task)
+        task.add_done_callback(_pending_webhook_tasks.discard)
 
 
 # ── Background task runner ────────────────────────────────────────────────────
@@ -341,7 +436,9 @@ async def _run_task_background(
             if record is None:
                 return
             if record._cancel_event.is_set():
-                await _store.update_state(task_id, CANCELED)
+                canceled = await _store.update_state(task_id, CANCELED)
+                if canceled is not None:
+                    await _push(canceled)
                 return
 
             if event_type == "text":
@@ -367,12 +464,15 @@ async def _run_task_background(
                 return
 
     except asyncio.CancelledError:
-        await _store.update_state(task_id, CANCELED)
+        canceled = await _store.update_state(task_id, CANCELED)
+        if canceled is not None:
+            await _push(canceled)
         raise
     except Exception as exc:
         logger.exception("[a2a] background task %s crashed", task_id)
         record = await _store.update_state(task_id, FAILED, error=str(exc))
-        await _push(record)
+        if record is not None:
+            await _push(record)
 
 
 # ── SSE helpers ───────────────────────────────────────────────────────────────
@@ -515,7 +615,9 @@ def register_a2a_routes(
             async for event_type, payload in chat_stream_fn_factory(text, context_id):
                 r = await _store.get(task_id)
                 if r and r._cancel_event.is_set():
-                    await _store.update_state(task_id, CANCELED)
+                    canceled = await _store.update_state(task_id, CANCELED)
+                    if canceled is not None:
+                        await _push(canceled)
                     yield _sse_rpc(
                         rpc_id,
                         {
@@ -764,13 +866,21 @@ def register_a2a_routes(
     @app.post("/tasks/{task_id}:cancel", include_in_schema=False)
     async def _cancel_task(task_id: str, request: Request):
         _check_auth(request, api_key)
-        record = await _store.get(task_id)
-        if record is None:
+        # Single atomic read+write under the store lock. The previous
+        # get → sleep → cancel → update sequence could race with the
+        # background runner and clobber a legitimate COMPLETED state.
+        if await _store.get(task_id) is None:
             raise HTTPException(404, f"Task not found: {task_id}")
-        if record.state in _TERMINAL:
-            raise HTTPException(409, f"Task already terminal: {record.state}")
-        await _store.cancel(task_id)
-        record = await _store.update_state(task_id, CANCELED)
+        record = await _store.cancel_if_not_terminal(task_id)
+        if record is None:
+            # Either disappeared under us (very unlikely) or already terminal.
+            existing = await _store.get(task_id)
+            if existing is None:
+                raise HTTPException(404, f"Task not found: {task_id}")
+            raise HTTPException(409, f"Task already terminal: {existing.state}")
+        # Webhook consumers should hear about the cancel transition, same as
+        # any other terminal state.
+        await _push(record)
         return _task_to_response(record)
 
     # ── POST /tasks/{task_id}/pushNotificationConfigs ─────────────────────────
@@ -782,21 +892,30 @@ def register_a2a_routes(
         if record is None:
             raise HTTPException(404, f"Task not found: {task_id}")
 
+        url = body.get("url", "")
+        if not url:
+            raise HTTPException(400, "url is required")
+        if not _is_safe_webhook_url(url):
+            raise HTTPException(
+                400,
+                "webhook url rejected: must be http/https, public IP, "
+                "not loopback/private/link-local/multicast/reserved",
+            )
+
         auth = body.get("authentication") or {}
         cfg = PushNotificationConfig(
-            url=body.get("url", ""),
+            url=url,
             token=auth.get("credentials"),
             id=body.get("id", str(uuid4())),
         )
-        if not cfg.url:
-            raise HTTPException(400, "url is required")
 
         async with _store._lock:
             record.push_config = cfg
 
-        # If task already terminal, fire webhook immediately
+        # If task already terminal, fire webhook immediately via the tracked
+        # _push path so the delivery task isn't GC'd mid-retry.
         if record.state in _TERMINAL:
-            asyncio.create_task(_deliver_webhook(record, cfg))
+            await _push(record)
 
         logger.info("[a2a] push config registered for task %s → %s", task_id, cfg.url)
         return {"id": cfg.id, "task_id": task_id, "url": cfg.url}

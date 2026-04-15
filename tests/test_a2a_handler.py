@@ -52,16 +52,19 @@ def store() -> A2ATaskStore:
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_store():
-    """Clear the module-level _store between tests.
+def _reset_module_state():
+    """Clear module-level _store + _pending_webhook_tasks between tests.
 
     Route-integration tests exercise register_a2a_routes() which always uses
-    the module singleton, so tasks from one test would otherwise leak into
+    the module singletons, so tasks from one test would otherwise leak into
     the next. Clearing on entry and exit keeps tests hermetic.
     """
+    from a2a_handler import _pending_webhook_tasks
     _store._tasks.clear()
+    _pending_webhook_tasks.clear()
     yield
     _store._tasks.clear()
+    _pending_webhook_tasks.clear()
 
 
 # ── Task store ────────────────────────────────────────────────────────────────
@@ -183,6 +186,134 @@ async def test_start_cleanup_is_idempotent(store):
         await first
     except asyncio.CancelledError:
         pass
+
+
+# ── Atomic cancel ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cancel_if_not_terminal_returns_updated_record(store):
+    record = _make_record(state=WORKING)
+    await store.create(record)
+    result = await store.cancel_if_not_terminal("test-task-id")
+    assert result is not None
+    assert result.state == CANCELED
+    # Update event rotates so subscribers wake up (same contract as update_state)
+    assert record._cancel_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancel_if_not_terminal_returns_none_when_already_terminal(store):
+    """Prevents the route handler from clobbering a COMPLETED state that
+    the runner wrote while the request was in flight."""
+    record = _make_record(state=COMPLETED)
+    await store.create(record)
+    result = await store.cancel_if_not_terminal("test-task-id")
+    assert result is None
+    # Record must still be COMPLETED — not downgraded to CANCELED
+    assert (await store.get("test-task-id")).state == COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_cancel_if_not_terminal_returns_none_when_missing(store):
+    assert await store.cancel_if_not_terminal("no-such-id") is None
+
+
+# ── SSRF validation ───────────────────────────────────────────────────────────
+
+
+def test_ssrf_rejects_non_http_scheme():
+    from a2a_handler import _is_safe_webhook_url
+    assert _is_safe_webhook_url("file:///etc/passwd") is False
+    assert _is_safe_webhook_url("gopher://example.com/x") is False
+    assert _is_safe_webhook_url("javascript:alert(1)") is False
+
+
+def test_ssrf_rejects_loopback():
+    from a2a_handler import _is_safe_webhook_url
+    assert _is_safe_webhook_url("http://127.0.0.1/hook") is False
+    assert _is_safe_webhook_url("http://localhost/hook") is False
+    assert _is_safe_webhook_url("http://[::1]/hook") is False
+
+
+def test_ssrf_rejects_rfc1918():
+    from a2a_handler import _is_safe_webhook_url
+    assert _is_safe_webhook_url("http://10.0.0.1/hook") is False
+    assert _is_safe_webhook_url("http://192.168.1.1/hook") is False
+    assert _is_safe_webhook_url("http://172.16.0.1/hook") is False
+
+
+def test_ssrf_rejects_link_local_and_metadata():
+    """169.254.169.254 is the AWS/GCP instance-metadata endpoint — the
+    canonical SSRF target. Must be blocked."""
+    from a2a_handler import _is_safe_webhook_url
+    assert _is_safe_webhook_url("http://169.254.169.254/latest/meta-data") is False
+    assert _is_safe_webhook_url("http://169.254.1.1/hook") is False
+
+
+def test_ssrf_rejects_unresolvable_hostname():
+    from a2a_handler import _is_safe_webhook_url
+    # A hostname under RFC2606's invalid TLD — guaranteed not to resolve.
+    assert _is_safe_webhook_url("http://totally-not-a-real-host.invalid/") is False
+
+
+def test_ssrf_rejects_malformed_url():
+    from a2a_handler import _is_safe_webhook_url
+    assert _is_safe_webhook_url("") is False
+    assert _is_safe_webhook_url("not-a-url") is False
+    assert _is_safe_webhook_url("http://") is False
+
+
+def test_ssrf_accepts_public_ip_literal():
+    """A globally-routable IP literal passes — covers the common case of
+    operators giving a Tailscale/cloud public IP without DNS."""
+    from a2a_handler import _is_safe_webhook_url
+    assert _is_safe_webhook_url("https://8.8.8.8/hook") is True
+
+
+def test_parse_push_config_rejects_unsafe_url():
+    """Integration between the parser and the SSRF check — malicious
+    submit-time configurations must be dropped (return None), not converted
+    into a PushNotificationConfig the runner would then deliver to."""
+    from a2a_handler import _parse_push_config
+    cfg = _parse_push_config({"pushNotificationConfig": {"url": "http://169.254.169.254/"}})
+    assert cfg is None
+
+
+# ── Webhook task retention ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_push_retains_webhook_task_reference():
+    """Regression: asyncio.create_task(...) without storing the handle risks
+    GC mid-retry (Python 3.11+ docs). _push must add the task to the
+    module-level set and only drop it on completion."""
+    from a2a_handler import _pending_webhook_tasks, _push
+
+    record = _make_record(state=COMPLETED, accumulated_text="done")
+    record.push_config = PushNotificationConfig(url="https://example.com/hook")
+
+    captured_tasks = []
+    evt = asyncio.Event()
+
+    async def _slow_deliver(r, cfg):
+        # Stall long enough for the caller to observe task retention.
+        await evt.wait()
+
+    with patch("a2a_handler._deliver_webhook", _slow_deliver):
+        await _push(record)
+        await asyncio.sleep(0)  # let create_task schedule
+
+        # Exactly one in-flight delivery, registered in the retention set.
+        assert len(_pending_webhook_tasks) == 1
+        task = next(iter(_pending_webhook_tasks))
+        captured_tasks.append(task)
+
+        # Release the stall; task completes; done_callback evicts from set.
+        evt.set()
+        await task
+        await asyncio.sleep(0)
+        assert task not in _pending_webhook_tasks
 
 
 # ── Background task runner ────────────────────────────────────────────────────
