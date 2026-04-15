@@ -4,19 +4,29 @@ Implements the A2A spec (https://a2a-protocol.org/latest/) as a FastAPI route
 factory.  All route logic lives here; server.py calls register_a2a_routes()
 once during startup and otherwise stays out of the way.
 
-Supported operations
-────────────────────
-  POST /a2a                            JSON-RPC 2.0 (legacy, backwards-compat)
-    method: message/send               → async, returns submitted immediately
-    method: message/sendStream         → SSE stream
+JSON-RPC 2.0 methods on POST /a2a
+─────────────────────────────────
+  message/send                         async submit, returns Task with state=submitted
+  message/stream                       send + SSE stream (spec-canonical name)
+  message/sendStream                   deprecated alias for message/stream
+  tasks/get                            fetch current Task state + artifact
+  tasks/cancel                         cooperative cancel
+  tasks/resubscribe                    SSE reconnect to an in-flight task
+  tasks/pushNotificationConfig/set     register a webhook for a task
+  tasks/pushNotificationConfig/get     read the current webhook config
+  tasks/pushNotificationConfig/list    list configs (single-slot today — always 0 or 1)
+  tasks/pushNotificationConfig/delete  clear the webhook
 
-  POST /message:send                   REST alias for message/send  (HTTP 202)
-  POST /message:stream                 REST alias for message/sendStream (SSE)
-  GET  /tasks/{id}                     Poll task state + artifact
-  GET  /tasks/{id}:subscribe           SSE reconnect to in-progress task
-  POST /tasks/{id}:cancel              Cancel a running task
-  POST /tasks/{id}/pushNotificationConfigs   Register webhook after task creation
-  GET  /.well-known/agent.json         Agent card
+REST convenience aliases
+────────────────────────
+  POST /message:send                   same as message/send   (HTTP 202)
+  POST /message:stream                 same as message/stream (SSE)
+  GET  /tasks/{id}                     same as tasks/get
+  GET  /tasks/{id}:subscribe           same as tasks/resubscribe (plain SSE, no JSON-RPC envelope)
+  POST /tasks/{id}:cancel              same as tasks/cancel
+  POST /tasks/{id}/pushNotificationConfigs   same as tasks/pushNotificationConfig/set
+
+  GET  /.well-known/agent{,-card}.json Agent card (both paths)
 """
 
 from __future__ import annotations
@@ -865,7 +875,90 @@ def register_a2a_routes(
             logger.info("[a2a] stream consumer for %s disconnected; bg task continues", task_id)
             raise
 
-    # ── POST /a2a  (JSON-RPC 2.0 — legacy, backwards-compat) ─────────────────
+    # ── JSON-RPC tasks/resubscribe SSE ───────────────────────────────────────
+
+    async def _resubscribe_jsonrpc_stream(task_id: str, rpc_id: Any):
+        """Mirror of the REST :subscribe path but every frame is wrapped in
+        a JSON-RPC envelope keyed to ``rpc_id`` so SDK clients can thread
+        the stream back to the request they issued. Snapshot is emitted as
+        an ``append: false`` full-text frame; subsequent updates are
+        ``append: true`` deltas only (no duplicated content on the wire).
+        """
+        snapshot = await _store.get(task_id)
+        if snapshot is None:
+            return
+        snapshot_len = len(snapshot.accumulated_text)
+
+        # Initial snapshot — status + full artifact replacement if text exists.
+        base_status: dict[str, Any] = {
+            "id": task_id, "contextId": snapshot.context_id,
+            "status": {"state": snapshot.state, "timestamp": snapshot.updated_at},
+        }
+        if snapshot.accumulated_text:
+            base_status["artifacts"] = [{
+                "parts": _terminal_artifact_parts(snapshot)
+                         if snapshot.state == COMPLETED
+                         else [{"kind": "text", "text": snapshot.accumulated_text}],
+                "append": False,
+                "last_chunk": snapshot.state in _TERMINAL,
+            }]
+        yield _sse_rpc(rpc_id, base_status)
+
+        try:
+            async for kind, r, payload in _watch_task(
+                task_id, start_text_len=snapshot_len,
+            ):
+                if kind == "keepalive":
+                    yield ": keepalive\n\n"
+                    continue
+                if r is None:
+                    return
+                if kind == "status":
+                    frame: dict[str, Any] = {
+                        "id": task_id, "contextId": r.context_id,
+                        "status": {"state": r.state, "timestamp": r.updated_at},
+                    }
+                    if r.error_message:
+                        frame["status"]["message"] = {
+                            "role": "agent",
+                            "parts": [{"kind": "text", "text": r.error_message}],
+                        }
+                    elif r.last_status_message and r.state not in _TERMINAL:
+                        frame["status"]["message"] = {
+                            "role": "agent",
+                            "parts": [{"kind": "text", "text": r.last_status_message}],
+                        }
+                    if r.state == COMPLETED:
+                        frame["artifacts"] = [{
+                            "parts": _terminal_artifact_parts(r),
+                            "append": False,
+                            "last_chunk": True,
+                        }]
+                    yield _sse_rpc(rpc_id, frame)
+                elif kind == "text_delta":
+                    if r.state not in _TERMINAL and payload:
+                        yield _sse_rpc(rpc_id, {
+                            "id": task_id, "contextId": r.context_id,
+                            "status": {"state": WORKING},
+                            "artifacts": [{
+                                "parts": [{"kind": "text", "text": payload}],
+                                "append": True,
+                                "last_chunk": False,
+                            }],
+                        })
+        except asyncio.CancelledError:
+            logger.info(
+                "[a2a] resubscribe consumer for %s disconnected; bg task continues",
+                task_id,
+            )
+            raise
+
+    # ── POST /a2a  (JSON-RPC 2.0 — full spec surface) ────────────────────────
+    # The @a2a-js/sdk Client exclusively uses JSON-RPC over this endpoint for
+    # every operation: message/*, tasks/*, tasks/pushNotificationConfig/*.
+    # Historically only message/send + message/sendStream were routed here,
+    # which silently broke every other SDK call path with -32601. See the
+    # handler docstring at the top of this module for the full method list.
 
     @app.post("/a2a", include_in_schema=False)
     async def _a2a_rpc(request: Request, req: dict):
@@ -874,49 +967,169 @@ def register_a2a_routes(
 
         rpc_id = req.get("id")
         method = req.get("method", "")
-        params = req.get("params", {})
+        params = req.get("params") or {}
 
-        message = params.get("message", {})
-        context_id = params.get("contextId", "")
-        configuration = params.get("configuration", {})
+        def _rpc_error(code: int, message: str):
+            return {"jsonrpc": "2.0", "id": rpc_id,
+                    "error": {"code": code, "message": message}}
 
-        parts = message.get("parts", [])
-        text = next((p.get("text", "") for p in parts if p.get("kind") == "text"), "")
-        if not text:
-            text = next((p.get("text", "") for p in parts), "")
+        def _rpc_result(result):
+            return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
 
-        if not text:
-            return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32600, "message": "No text content in message"}}
+        # ── message/send, message/stream ─────────────────────────────────────
+        # Both methods take a Message and create a new Task. `message/stream`
+        # is the spec name; `message/sendStream` is a deprecated protoPen-era
+        # alias kept so nothing that already sends the old name breaks.
+        if method in ("message/send", "message/stream", "message/sendStream"):
+            message = params.get("message") or {}
+            parts = message.get("parts") or []
+            text = next((p.get("text", "") for p in parts
+                         if p.get("kind") == "text"), "")
+            if not text:
+                text = next((p.get("text", "") for p in parts), "")
+            if not text:
+                return _rpc_error(-32602, "Invalid params: message must contain a text part")
 
-        context_id = context_id or f"a2a-{uuid4()}"
-        push_config = _parse_push_config(configuration)
+            context_id = params.get("contextId") or f"a2a-{uuid4()}"
+            configuration = params.get("configuration") or {}
+            push_config = _parse_push_config(configuration)
 
-        # ── message/sendStream → SSE ──────────────────────────────────────────
-        if method == "message/sendStream":
+            if method == "message/send":
+                record = await _submit_task(text, context_id, push_config)
+                return _rpc_result({
+                    "id": record.id,
+                    "contextId": record.context_id,
+                    "status": {"state": SUBMITTED,
+                               "timestamp": record.created_at},
+                })
+
+            # streaming path — SSE frames wrapped in JSON-RPC envelopes
             return StreamingResponse(
                 _stream_new_task(text, context_id, push_config, rpc_id=rpc_id),
                 media_type="text/event-stream",
                 headers=_SSE_HEADERS,
             )
 
-        # ── message/send → async, returns submitted immediately ───────────────
-        if method == "message/send":
-            record = await _submit_task(text, context_id, push_config)
-            return {
-                "jsonrpc": "2.0",
-                "id": rpc_id,
-                "result": {
-                    "id": record.id,
-                    "contextId": record.context_id,
-                    "status": {"state": SUBMITTED, "timestamp": record.created_at},
-                },
-            }
+        # ── tasks/get ─────────────────────────────────────────────────────────
+        if method == "tasks/get":
+            task_id = params.get("id")
+            if not task_id:
+                return _rpc_error(-32602, "Invalid params: id is required")
+            record = await _store.get(task_id)
+            if record is None:
+                return _rpc_error(-32001, f"Task not found: {task_id}")
+            return _rpc_result(_task_to_response(record))
 
-        return {
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "error": {"code": -32601, "message": f"Method not found: {method}"},
-        }
+        # ── tasks/cancel ──────────────────────────────────────────────────────
+        # Atomic via cancel_if_not_terminal; fires a push notification so
+        # webhook consumers see the cancel transition (same as the REST route).
+        if method == "tasks/cancel":
+            task_id = params.get("id")
+            if not task_id:
+                return _rpc_error(-32602, "Invalid params: id is required")
+            if await _store.get(task_id) is None:
+                return _rpc_error(-32001, f"Task not found: {task_id}")
+            record = await _store.cancel_if_not_terminal(task_id)
+            if record is None:
+                existing = await _store.get(task_id)
+                state = existing.state if existing else "unknown"
+                return _rpc_error(-32002, f"Task already terminal: {state}")
+            await _push(record)
+            return _rpc_result(_task_to_response(record))
+
+        # ── tasks/resubscribe ─────────────────────────────────────────────────
+        # JSON-RPC-framed SSE reconnect. Mirrors the REST :subscribe route
+        # but wraps every frame in a JSON-RPC envelope keyed to rpc_id so
+        # the client library can thread the stream back to its request.
+        if method == "tasks/resubscribe":
+            task_id = params.get("id")
+            if not task_id:
+                return _rpc_error(-32602, "Invalid params: id is required")
+            if await _store.get(task_id) is None:
+                return _rpc_error(-32001, f"Task not found: {task_id}")
+            return StreamingResponse(
+                _resubscribe_jsonrpc_stream(task_id, rpc_id),
+                media_type="text/event-stream",
+                headers=_SSE_HEADERS,
+            )
+
+        # ── tasks/pushNotificationConfig/{set,get,list,delete} ────────────────
+        # The task store today holds a single PushNotificationConfig per task;
+        # list returns [cfg] or [] to satisfy the spec shape.
+        if method == "tasks/pushNotificationConfig/set":
+            task_id = params.get("taskId")
+            if not task_id:
+                return _rpc_error(-32602, "Invalid params: taskId is required")
+            record = await _store.get(task_id)
+            if record is None:
+                return _rpc_error(-32001, f"Task not found: {task_id}")
+            cfg_in = params.get("pushNotificationConfig") or {}
+            url = cfg_in.get("url", "")
+            if not url:
+                return _rpc_error(-32602, "Invalid params: pushNotificationConfig.url is required")
+            if not _is_safe_webhook_url(url):
+                return _rpc_error(
+                    -32602,
+                    "webhook url rejected: must be http/https, public IP, "
+                    "not loopback/private/link-local/multicast/reserved",
+                )
+            auth = cfg_in.get("authentication") or {}
+            cfg = PushNotificationConfig(
+                url=url,
+                token=auth.get("credentials"),
+                id=cfg_in.get("id", str(uuid4())),
+            )
+            async with _store._lock:
+                record.push_config = cfg
+            if record.state in _TERMINAL:
+                await _push(record)
+            return _rpc_result({
+                "taskId": task_id,
+                "pushNotificationConfig": {"url": cfg.url, "id": cfg.id},
+            })
+
+        if method == "tasks/pushNotificationConfig/get":
+            task_id = params.get("taskId")
+            if not task_id:
+                return _rpc_error(-32602, "Invalid params: taskId is required")
+            record = await _store.get(task_id)
+            if record is None:
+                return _rpc_error(-32001, f"Task not found: {task_id}")
+            cfg = record.push_config
+            if cfg is None:
+                return _rpc_result(None)
+            return _rpc_result({
+                "taskId": task_id,
+                "pushNotificationConfig": {"url": cfg.url, "id": cfg.id},
+            })
+
+        if method == "tasks/pushNotificationConfig/list":
+            task_id = params.get("taskId")
+            if not task_id:
+                return _rpc_error(-32602, "Invalid params: taskId is required")
+            record = await _store.get(task_id)
+            if record is None:
+                return _rpc_error(-32001, f"Task not found: {task_id}")
+            cfg = record.push_config
+            if cfg is None:
+                return _rpc_result([])
+            return _rpc_result([{
+                "taskId": task_id,
+                "pushNotificationConfig": {"url": cfg.url, "id": cfg.id},
+            }])
+
+        if method == "tasks/pushNotificationConfig/delete":
+            task_id = params.get("taskId")
+            if not task_id:
+                return _rpc_error(-32602, "Invalid params: taskId is required")
+            record = await _store.get(task_id)
+            if record is None:
+                return _rpc_error(-32001, f"Task not found: {task_id}")
+            async with _store._lock:
+                record.push_config = None
+            return _rpc_result(None)
+
+        return _rpc_error(-32601, f"Method not found: {method}")
 
     # ── POST /message:send  (REST) ────────────────────────────────────────────
 
