@@ -150,6 +150,27 @@ def test_update_requires_id() -> None:
     assert "Error" in result and "id" in result.lower()
 
 
+def test_update_rejects_bad_id() -> None:
+    tool = ManageCronTool()
+    result = _run(tool.execute(action="update", id="has spaces", schedule="0 0 * * *"))
+    assert "Error" in result
+    assert "alphanumeric" in result
+
+
+def test_delete_rejects_bad_id() -> None:
+    tool = ManageCronTool()
+    result = _run(tool.execute(action="delete", id="../etc/passwd"))
+    assert "Error" in result
+    assert "alphanumeric" in result
+
+
+def test_run_rejects_bad_id() -> None:
+    tool = ManageCronTool()
+    result = _run(tool.execute(action="run", id="bad id"))
+    assert "Error" in result
+    assert "alphanumeric" in result
+
+
 def test_update_errors_with_empty_body() -> None:
     tool = ManageCronTool()
     result = _run(tool.execute(action="update", id="q.d"))
@@ -168,6 +189,41 @@ def test_update_hits_expected_endpoint(monkeypatch) -> None:
     assert fake.last_post["url"] == "http://ws:3000/api/ceremonies/quinn.daily/update"
     assert fake.last_post["json"] == {"schedule": "0 9 * * *"}
     assert "updated" in result.lower()
+
+
+def test_update_omits_enabled_when_not_passed(monkeypatch) -> None:
+    """The ManageCronTool layer treats 'enabled' as present-only when
+    explicitly in kwargs. Without this, every update silently re-enabled
+    any paused ceremony because the @tool wrapper used to default to True."""
+    fake = _FakeClient(_fake_response(body={"success": True}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_: fake)
+    tool = ManageCronTool()
+    _run(tool.execute(action="update", id="q.d", schedule="0 9 * * *"))
+    assert "enabled" not in fake.last_post["json"]
+
+
+def test_update_forwards_enabled_when_explicitly_set(monkeypatch) -> None:
+    fake = _FakeClient(_fake_response(body={"success": True}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_: fake)
+    tool = ManageCronTool()
+    _run(tool.execute(action="update", id="q.d", enabled=False))
+    assert fake.last_post["json"]["enabled"] is False
+
+
+def test_lg_tools_wrapper_omits_enabled_by_default() -> None:
+    """Source-level guard: the LangGraph @tool wrapper must only forward
+    'enabled' when the caller explicitly sets it, otherwise every
+    update call silently re-enables paused ceremonies. Tested via source
+    text to avoid importing langchain_core in the test env."""
+    from pathlib import Path
+    src = (Path(__file__).parents[1] / "tools" / "lg_tools.py").read_text()
+    # The default must be None (present-only semantics), not True.
+    assert "enabled: bool | None = None" in src, (
+        "manage_cron @tool wrapper must default enabled=None so it is "
+        "only forwarded when the caller explicitly sets it."
+    )
+    # Enforce the guard — look for the conditional forward.
+    assert "if enabled is not None" in src
 
 
 def test_delete_hits_expected_endpoint(monkeypatch) -> None:

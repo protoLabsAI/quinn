@@ -384,7 +384,7 @@ async def manage_cron(
     schedule: str = "",
     skill: str = "",
     targets: str = "",
-    enabled: bool = True,
+    enabled: bool | None = None,
     notifyChannel: str = "",
 ) -> str:
     """Create, update, delete, list, or manually fire scheduled ceremonies
@@ -394,17 +394,22 @@ async def manage_cron(
     Actions:
     - list: List all ceremonies
     - create: Create a ceremony (requires id, name, schedule, skill)
-    - update: Update an existing ceremony by id
+    - update: Update an existing ceremony by id (omit enabled to leave its
+      current value untouched — passing enabled=True on every update would
+      silently re-enable any paused ceremony)
     - delete: Delete a ceremony by id
     - run: Manually fire a ceremony now (for testing — ignores schedule)
 
     schedule is a 5-field cron expression (min hr dom mon dow), UTC.
     targets is a comma-separated list (e.g. "quinn" or "quinn,ava"); defaults to "all".
     """
-    return await _manage_cron.execute(
-        action=action, id=id, name=name, schedule=schedule, skill=skill,
-        targets=targets, enabled=enabled, notifyChannel=notifyChannel,
-    )
+    kwargs: dict[str, object] = {
+        "action": action, "id": id, "name": name, "schedule": schedule,
+        "skill": skill, "targets": targets, "notifyChannel": notifyChannel,
+    }
+    if enabled is not None:
+        kwargs["enabled"] = enabled
+    return await _manage_cron.execute(**kwargs)
 
 
 def get_all_tools(qa_store=None):

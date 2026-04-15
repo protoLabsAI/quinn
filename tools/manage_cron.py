@@ -194,6 +194,8 @@ class ManageCronTool(Tool):
         id_ = kwargs.get("id", "").strip()
         if not id_:
             return "Error: update requires id."
+        if not _ID_PATTERN.match(id_):
+            return f"Error: id '{id_}' invalid — alphanumeric, dots, and dashes only."
 
         body: dict[str, Any] = {}
         for key in ("name", "schedule", "skill", "notifyChannel"):
@@ -226,6 +228,8 @@ class ManageCronTool(Tool):
         id_ = kwargs.get("id", "").strip()
         if not id_:
             return "Error: delete requires id."
+        if not _ID_PATTERN.match(id_):
+            return f"Error: id '{id_}' invalid — alphanumeric, dots, and dashes only."
 
         async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
             resp = await client.post(
@@ -242,6 +246,8 @@ class ManageCronTool(Tool):
         id_ = kwargs.get("id", "").strip()
         if not id_:
             return "Error: run requires id."
+        if not _ID_PATTERN.match(id_):
+            return f"Error: id '{id_}' invalid — alphanumeric, dots, and dashes only."
 
         async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
             resp = await client.post(
