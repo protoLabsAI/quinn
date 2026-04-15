@@ -128,6 +128,63 @@ async def test_store_cancel_missing(store):
     assert await store.cancel("no-such-id") is False
 
 
+# ── Eviction ──────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cleanup_removes_old_terminal_tasks(store):
+    """Terminal tasks older than the TTL are evicted; recent ones survive."""
+    from datetime import datetime, timedelta, timezone
+
+    old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    recent_ts = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+
+    old = _make_record(id="old", state=COMPLETED)
+    old.updated_at = old_ts
+    recent = _make_record(id="recent", state=COMPLETED)
+    recent.updated_at = recent_ts
+
+    await store.create(old)
+    await store.create(recent)
+
+    removed = await store.cleanup_expired(ttl_seconds=3600)  # 1 hour
+    assert removed == 1
+    assert await store.get("old") is None
+    assert await store.get("recent") is not None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_spares_working_tasks_regardless_of_age(store):
+    """A task that's been WORKING for hours must stay — only terminal tasks age out."""
+    from datetime import datetime, timedelta, timezone
+
+    stale_working = _make_record(id="stuck", state=WORKING)
+    stale_working.updated_at = (
+        datetime.now(timezone.utc) - timedelta(days=7)
+    ).isoformat()
+    await store.create(stale_working)
+
+    removed = await store.cleanup_expired(ttl_seconds=60)
+    assert removed == 0
+    assert await store.get("stuck") is not None
+
+
+@pytest.mark.asyncio
+async def test_start_cleanup_is_idempotent(store):
+    """Calling start_cleanup repeatedly must not spawn multiple loops — the
+    route handlers call it on every request, so this property matters."""
+    store.start_cleanup(interval_s=60, ttl_s=60)
+    first = store._cleanup_task
+    store.start_cleanup(interval_s=60, ttl_s=60)
+    second = store._cleanup_task
+    assert first is second
+    first.cancel()
+    try:
+        await first
+    except asyncio.CancelledError:
+        pass
+
+
 # ── Background task runner ────────────────────────────────────────────────────
 
 

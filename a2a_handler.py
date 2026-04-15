@@ -81,6 +81,10 @@ class TaskRecord:
 # ── Task store ────────────────────────────────────────────────────────────────
 
 
+_DEFAULT_TERMINAL_TTL_S = 3600     # evict terminal tasks older than 1h
+_DEFAULT_CLEANUP_INTERVAL_S = 300  # sweep every 5 min
+
+
 class A2ATaskStore:
     """Asyncio-safe in-memory task store.
 
@@ -88,11 +92,17 @@ class A2ATaskStore:
     _update_event with a new asyncio.Event and sets the old one so all current
     subscribers wake up in lock-step.  The new event is ready for the next
     batch of waiters.
+
+    Retains tasks in-memory for ``_DEFAULT_TERMINAL_TTL_S`` after they hit a
+    terminal state so pollers/webhook delivery still see them, then evicts.
+    Without this, a long-lived process would leak memory proportional to total
+    lifetime traffic.
     """
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._tasks: dict[str, TaskRecord] = {}
+        self._cleanup_task: asyncio.Task | None = None
 
     async def create(self, record: TaskRecord) -> TaskRecord:
         async with self._lock:
@@ -126,13 +136,64 @@ class A2ATaskStore:
         return record
 
     async def cancel(self, task_id: str) -> bool:
-        record = self._tasks.get(task_id)
+        # Acquire the lock to match every other store mutation. Event.set()
+        # and Task.cancel() are themselves thread-safe so we drop the lock
+        # before calling them to avoid holding it across cooperative yields.
+        async with self._lock:
+            record = self._tasks.get(task_id)
         if record is None:
             return False
         record._cancel_event.set()
         if record._bg_task and not record._bg_task.done():
             record._bg_task.cancel()
         return True
+
+    async def cleanup_expired(self, ttl_seconds: int = _DEFAULT_TERMINAL_TTL_S) -> int:
+        """Remove terminal tasks whose ``updated_at`` is older than ttl_seconds.
+
+        Returns the count removed. Working / submitted tasks are never evicted —
+        they stay until they reach a terminal state, then age out normally.
+        """
+        cutoff = datetime.now(timezone.utc).timestamp() - ttl_seconds
+        removed = 0
+        async with self._lock:
+            for tid in list(self._tasks.keys()):
+                r = self._tasks[tid]
+                if r.state not in _TERMINAL:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(r.updated_at).timestamp()
+                except ValueError:
+                    continue
+                if ts < cutoff:
+                    del self._tasks[tid]
+                    removed += 1
+        if removed:
+            logger.debug("[a2a] evicted %d expired terminal task(s)", removed)
+        return removed
+
+    def start_cleanup(
+        self,
+        interval_s: int = _DEFAULT_CLEANUP_INTERVAL_S,
+        ttl_s: int = _DEFAULT_TERMINAL_TTL_S,
+    ) -> None:
+        """Start the background eviction loop. Idempotent — safe to call from
+        every request handler. No-op if already running.
+
+        Lazy rather than eager because __init__ runs at module import time,
+        before an asyncio event loop exists.
+        """
+        if self._cleanup_task and not self._cleanup_task.done():
+            return
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop(interval_s, ttl_s))
+
+    async def _cleanup_loop(self, interval_s: int, ttl_s: int) -> None:
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                await self.cleanup_expired(ttl_s)
+            except Exception as exc:
+                logger.warning("[a2a] cleanup loop error: %s", exc)
 
 
 # Module-level singleton — one store per process
@@ -368,6 +429,10 @@ def register_a2a_routes(
         push_config: PushNotificationConfig | None,
     ) -> TaskRecord:
         """Create a TaskRecord, fire the background runner, return immediately."""
+        # Lazy-start the cleanup loop the first time we're inside a running
+        # event loop. Idempotent, cheap.
+        _store.start_cleanup()
+
         task_id = str(uuid4())
         now = _now_iso()
         record = TaskRecord(
@@ -402,6 +467,7 @@ def register_a2a_routes(
         rpc_id: Any = None,
     ):
         """Async generator: creates a task and streams its events as SSE."""
+        _store.start_cleanup()
         task_id = str(uuid4())
         now = _now_iso()
         record = TaskRecord(
