@@ -37,43 +37,35 @@ Discord Webhooks
 **Knowledge**: SQLite + sqlite-vec (QA reports, bug patterns, release history)  
 **Observability**: Langfuse tracing, JSONL audit logs, Prometheus metrics
 
-## Quick Start
+## Deployment
 
-### Prerequisites
+Quinn is deployed as a service in the [`homelab-iac`](https://github.com/protoLabsAI/homelab-iac) AI stack. The image is published to GHCR on every merge to `main` (see `.github/workflows/docker-publish.yml`) and pulled at deploy time:
 
-- Docker and Docker Compose
-- [Infisical CLI](https://infisical.com/docs/cli/overview) installed and logged in to `secrets.proto-labs.ai`
-- LiteLLM gateway running (`stacks/ai`) with `protolabs/quinn` alias configured
-- protoLabs Studio server (the protoMaker team runtime) running (default: `http://automaker-server:3008`)
-
-### 1. Clone and configure
-
-```bash
-git clone https://github.com/protoLabsAI/quinn.git
-cd quinn
-
-# Log in to Infisical (one-time)
-infisical login --domain https://secrets.proto-labs.ai
-
-# Edit config/qa-config.json with your apps
+```
+ghcr.io/protolabsai/quinn:latest
+ghcr.io/protolabsai/quinn:sha-<shortsha>
+ghcr.io/protolabsai/quinn:v<semver>   # version tag pushes
 ```
 
-### 2. Run
+To deploy or restart:
 
 ```bash
-infisical run --domain https://secrets.proto-labs.ai/api --env=prod -- docker compose up -d --build
+cd ~/dev/homelab-iac/stacks/ai
+infisical run --domain https://secrets.proto-labs.ai/api --env=prod -- docker compose pull quinn
+infisical run --domain https://secrets.proto-labs.ai/api --env=prod -- docker compose up -d quinn
 ```
 
-Quinn's UI will be available at **http://localhost:7873**.
+Quinn's UI is reachable at **http://ava:7873** over the Tailnet (host port) or at `http://quinn:7870` from other services on `ai_default`.
 
-### 3. Auto-start on boot (systemd)
+## Local development
+
+Edit code in this repo, run tests with `pytest`, and iterate without building the full image. To test the image locally:
 
 ```bash
-sudo cp quinn.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable quinn
-sudo systemctl start quinn
+docker build -t quinn:local .
 ```
+
+The Dockerfile + `seccomp-profile.json` are the canonical build inputs; all runtime wiring (env vars, volumes, networks, tmpfs, security hardening) lives in `homelab-iac/stacks/ai/docker-compose.yml`.
 
 ## Secrets (Infisical AI Project)
 
