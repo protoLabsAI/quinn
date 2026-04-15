@@ -39,3 +39,62 @@ def test_agent_card_skills_still_present() -> None:
     card = _build_agent_card("quinn:7870")
     skill_ids = {s["id"] for s in card.get("skills", [])}
     assert {"qa_report", "bug_triage", "pr_review", "security_triage"} <= skill_ids
+
+
+def test_agent_card_declares_effect_domain_extension() -> None:
+    """protoWorkstacean's L1 planner reads capabilities.extensions with
+    uri = .../a2a/ext/effect-domain-v1 to rank Quinn's skills against
+    goals that target world-state selectors. Without this declaration,
+    the planner treats Quinn as a black box and falls back to LLM
+    reasoning (L2) to decide whether to dispatch her.
+    """
+    from server import _build_agent_card
+
+    card = _build_agent_card("quinn:7870")
+    exts = card["capabilities"].get("extensions", [])
+    effect_ext = next(
+        (e for e in exts
+         if e.get("uri") == "https://protolabs.ai/a2a/ext/effect-domain-v1"),
+        None,
+    )
+    assert effect_ext is not None, (
+        "Missing effect-domain-v1 extension — planner will black-box Quinn's skills."
+    )
+
+    skills = effect_ext.get("params", {}).get("skills", {})
+    # Only skills with directional mutations should be declared.
+    # bug_triage and security_triage both land features on the board.
+    assert "bug_triage" in skills
+    assert "security_triage" in skills
+
+    for skill_name in ("bug_triage", "security_triage"):
+        effects = skills[skill_name].get("effects", [])
+        assert effects, f"{skill_name} declared but has no effects"
+        for effect in effects:
+            # Schema per docs/extensions/effect-domain-v1.md
+            assert "domain" in effect
+            assert "path" in effect
+            assert isinstance(effect.get("delta"), (int, float))
+            confidence = effect.get("confidence")
+            assert isinstance(confidence, (int, float))
+            assert 0.0 <= confidence <= 1.0
+
+
+def test_agent_card_does_not_over_declare_read_only_effects() -> None:
+    """Read-only skills (board_audit, qa_report, pr_review) must NOT
+    declare effects — over-declaring confuses the planner into picking
+    Quinn for goals her skills can't actually move."""
+    from server import _build_agent_card
+
+    card = _build_agent_card("quinn:7870")
+    exts = card["capabilities"].get("extensions", [])
+    effect_ext = next(
+        (e for e in exts
+         if e.get("uri") == "https://protolabs.ai/a2a/ext/effect-domain-v1"),
+        {"params": {"skills": {}}},
+    )
+    declared = effect_ext["params"]["skills"]
+    for read_only in ("board_audit", "qa_report", "pr_review"):
+        assert read_only not in declared, (
+            f"{read_only} is a read-only skill and should not declare effects"
+        )
