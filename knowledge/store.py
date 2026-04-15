@@ -51,6 +51,11 @@ class KnowledgeStore:
             schema_sql = _SCHEMA_PATH.read_text()
             db.executescript(schema_sql)
 
+            # Idempotent migrations for DBs created before a column landed.
+            # CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so added
+            # columns need ALTER TABLE to reach already-initialized DBs.
+            self._migrate_schema(db)
+
             # Create vector tables
             db.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_vec
@@ -70,6 +75,24 @@ class KnowledgeStore:
         except Exception as e:
             print(f"[knowledge] DB init failed: {e}")
             return None
+
+    @staticmethod
+    def _migrate_schema(db: sqlite3.Connection) -> None:
+        """Apply additive schema migrations to an already-initialized DB.
+
+        Only runs ALTER TABLE when the column is missing, so it is safe to call
+        on every startup.
+        """
+        def _columns(table: str) -> set[str]:
+            return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608
+
+        # bug_patterns.related_features — added after the table shipped; used for
+        # cross-feature bug clustering. Pre-migration, INSERTs referencing this
+        # column raised "no such column" and the triage skill died silently.
+        if "related_features" not in _columns("bug_patterns"):
+            db.execute("ALTER TABLE bug_patterns ADD COLUMN related_features TEXT")
+
+        db.commit()
 
     def _embed(self, text: str) -> list[float] | None:
         try:
@@ -161,6 +184,7 @@ class KnowledgeStore:
         category: str = "",
         pattern: str = "",
         resolution: str = "",
+        related_features: list[str] | None = None,
     ) -> bool:
         """Store a recurring bug pattern for regression detection."""
         db = self._get_db()
@@ -169,7 +193,6 @@ class KnowledgeStore:
 
         now = self._now_iso()
 
-        # Check if pattern already exists (by title + app)
         existing = db.execute(
             "SELECT id, occurrences FROM bug_patterns WHERE title = ? AND app_name = ?",
             (title, app_name),
@@ -184,9 +207,14 @@ class KnowledgeStore:
             cursor = db.execute(
                 """INSERT INTO bug_patterns
                    (title, description, app_name, severity, category, pattern,
-                    occurrences, first_seen, last_seen, resolved, resolution)
-                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 0, ?)""",
-                (title, description, app_name, severity, category, pattern, now, now, resolution),
+                    occurrences, first_seen, last_seen, resolved, resolution,
+                    related_features)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 0, ?, ?)""",
+                (
+                    title, description, app_name, severity, category, pattern,
+                    now, now, resolution,
+                    json.dumps(related_features or []),
+                ),
             )
             embed_text = f"{title}\n{description}\n{pattern}"
             self._store_vector(db, embed_text, "bug_patterns", str(cursor.lastrowid))
@@ -377,6 +405,54 @@ class KnowledgeStore:
         db.commit()
         return True
 
+    # --- Regression Tests ---
+
+    def add_regression_test(
+        self,
+        title: str,
+        description: str,
+        steps: list[str] | None = None,
+        expected_result: str = "",
+        related_bug: str = "",
+        app_name: str = "",
+    ) -> bool:
+        """Store a scripted regression test tied to a known bug pattern."""
+        db = self._get_db()
+        if db is None:
+            return False
+
+        now = self._now_iso()
+        cursor = db.execute(
+            """INSERT INTO regression_tests
+               (title, description, steps, expected_result, related_bug, app_name, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                title, description, json.dumps(steps or []),
+                expected_result, related_bug, app_name, now,
+            ),
+        )
+        embed_text = f"{title}\n{description}"
+        self._store_vector(db, embed_text, "regression_tests", str(cursor.lastrowid))
+        db.commit()
+        return True
+
+    def get_regression_tests(
+        self, app_name: str | None = None, limit: int = 50,
+    ) -> list[dict]:
+        db = self._get_db()
+        if db is None:
+            return []
+        query = "SELECT * FROM regression_tests"
+        params: list[Any] = []
+        if app_name:
+            query += " WHERE app_name = ?"
+            params.append(app_name)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = db.execute(query, params).fetchall()
+        cols = [d[0] for d in db.execute("SELECT * FROM regression_tests LIMIT 0").description]
+        return [dict(zip(cols, row)) for row in rows]
+
     # --- Generic Entry (for flexible storage) ---
 
     def store_entry(
@@ -434,7 +510,16 @@ class KnowledgeStore:
         if db is None:
             return {}
         stats = {}
-        for table in ("qa_reports", "bug_patterns", "release_notes", "triage_log", "apps"):
-            count = db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in (
+            "qa_reports", "bug_patterns", "release_notes",
+            "triage_log", "apps", "regression_tests",
+        ):
+            count = db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
             stats[table] = count
         return stats
+
+    def find_similar_bugs(
+        self, description: str, k: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Semantic search scoped to bug_patterns."""
+        return self.search(description, k=k, filter_table="bug_patterns")
