@@ -330,6 +330,28 @@ def _strip_think(text: str) -> str:
     return text.strip()
 
 
+def _worldstate_delta_for_tool(tool_name: str, output: str) -> dict | None:
+    """Map a successful tool call to a worldstate-delta-v1 entry, or None.
+
+    Declared effects must match what Quinn's agent card advertises under the
+    effect-domain-v1 extension, so the planner's declared priors and the
+    runtime-reported observations agree. The keys here are the source of
+    truth — if a tool's effect changes, update both this function and the
+    card.
+    """
+    # file_bug lands a new feature on the protoMaker board. Matches the
+    # bug_triage / security_triage effect-domain-v1 declarations in
+    # _build_agent_card: +1 on protomaker_board.data.backlog_count.
+    if tool_name == "file_bug" and "Bug filed:" in output:
+        return {
+            "domain": "protomaker_board",
+            "path": "data.backlog_count",
+            "op": "inc",
+            "value": 1,
+        }
+    return None
+
+
 import queue as _queue_mod
 
 
@@ -396,6 +418,15 @@ async def _chat_langgraph_stream(message: str, session_id: str):
                 output = event.get("data", {}).get("output", "")
                 preview = str(output)[:300] if output else ""
                 yield ("tool_end", f"✅ {name} → {preview}")
+                # Emit worldstate-delta-v1 when a tool with known mutations
+                # succeeds. These are consumed by the A2A handler and emitted
+                # as a DataPart on the terminal task; Workstacean's
+                # effect-domain interceptor republishes them as
+                # world.state.delta bus events so the GOAP planner's cached
+                # snapshot updates without waiting for a poll cycle.
+                delta = _worldstate_delta_for_tool(name, str(output) if output else "")
+                if delta is not None:
+                    yield ("delta", delta)
 
             elif kind == "on_chat_model_stream":
                 chunk = event.get("data", {}).get("chunk")

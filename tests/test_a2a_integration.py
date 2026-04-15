@@ -98,3 +98,74 @@ def test_agent_card_does_not_over_declare_read_only_effects() -> None:
         assert read_only not in declared, (
             f"{read_only} is a read-only skill and should not declare effects"
         )
+
+
+# ── Worldstate-delta-v1 runtime emission ─────────────────────────────────────
+
+
+def test_file_bug_success_yields_board_backlog_delta() -> None:
+    """When file_bug completes with the success marker in its output, the
+    stream must emit a worldstate-delta matching the effect-domain-v1 entry
+    declared on the card. If these two diverge, Workstacean sees declared
+    priors that never get reconciled against observed mutations."""
+    from server import _worldstate_delta_for_tool
+
+    output = (
+        "Bug filed: **Button crash in Safari** → `feature-abc` "
+        "(severity=medium, status=backlog)"
+    )
+    delta = _worldstate_delta_for_tool("file_bug", output)
+    assert delta == {
+        "domain": "protomaker_board",
+        "path": "data.backlog_count",
+        "op": "inc",
+        "value": 1,
+    }
+
+
+def test_file_bug_error_yields_no_delta() -> None:
+    """An error response from file_bug must not emit a delta — the state
+    mutation didn't happen, we shouldn't claim otherwise."""
+    from server import _worldstate_delta_for_tool
+
+    assert _worldstate_delta_for_tool(
+        "file_bug",
+        "Error filing bug: API returned 503 — upstream unavailable",
+    ) is None
+
+
+def test_other_tools_yield_no_delta() -> None:
+    """Tools without declared effects must return None — we do not emit
+    speculative deltas for read-only tools (board_monitor, pr_inspector,
+    github_issues, etc.)."""
+    from server import _worldstate_delta_for_tool
+
+    for tool_name in ("board_monitor", "pr_inspector", "github_issues",
+                      "qa_memory", "discord_feed"):
+        assert _worldstate_delta_for_tool(tool_name, "some output") is None
+
+
+def test_delta_matches_effect_domain_declaration() -> None:
+    """The runtime-observed delta for file_bug must agree with the
+    effect-domain-v1 declaration for bug_triage on the card. Drift
+    between declared priors and observed mutations defeats the planner's
+    scoring model."""
+    from server import _build_agent_card, _worldstate_delta_for_tool
+
+    card = _build_agent_card("quinn:7870")
+    exts = card["capabilities"]["extensions"]
+    effect_ext = next(e for e in exts
+                      if e["uri"].endswith("/effect-domain-v1"))
+    declared = effect_ext["params"]["skills"]["bug_triage"]["effects"][0]
+
+    observed = _worldstate_delta_for_tool(
+        "file_bug",
+        "Bug filed: **x** → `feature-y` (severity=low, status=backlog)",
+    )
+    assert observed is not None
+    assert observed["domain"] == declared["domain"]
+    assert observed["path"] == declared["path"]
+    # Declared delta is a signed number; observed uses op/value form.
+    # +1 delta ⇔ inc by 1, so both representations agree.
+    assert observed["op"] == "inc"
+    assert observed["value"] == declared["delta"]

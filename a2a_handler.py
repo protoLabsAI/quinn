@@ -45,6 +45,13 @@ CANCELED = "canceled"
 
 _TERMINAL = {COMPLETED, FAILED, CANCELED}
 
+# MIME type for worldstate-delta-v1 artifacts. Workstacean's effect-domain
+# interceptor extracts any DataPart carrying this type on a terminal Task
+# and republishes the deltas as world.state.delta bus events, so the GOAP
+# planner can update its cached snapshot without waiting for the next poll.
+# Ref: protoWorkstacean/docs/extensions/worldstate-delta-v1.md
+WORLDSTATE_DELTA_MIME = "application/vnd.protolabs.worldstate-delta+json"
+
 # ── Data types ────────────────────────────────────────────────────────────────
 
 
@@ -72,6 +79,12 @@ class TaskRecord:
     accumulated_text: str = ""
     error_message: str | None = None
     push_config: PushNotificationConfig | None = None
+    # Observed world-state mutations to emit on the terminal artifact under
+    # the worldstate-delta-v1 MIME type. Populated during the run whenever a
+    # tool with known effects succeeds (see _chat_langgraph_stream). Shape:
+    # [{"domain": "protomaker_board", "path": "data.backlog_count",
+    #   "op": "inc", "value": 1}, ...]
+    deltas: list[dict] = field(default_factory=list)
     # ── asyncio primitives (not serialised) ──
     _cancel_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _update_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -147,6 +160,20 @@ class A2ATaskStore:
         if record._bg_task and not record._bg_task.done():
             record._bg_task.cancel()
         return True
+
+    async def add_delta(self, task_id: str, delta: dict) -> None:
+        """Append a worldstate-delta entry to the task's pending list.
+
+        Called when a tool with known mutations (e.g. file_bug) succeeds
+        mid-run. The accumulated deltas are emitted as a DataPart artifact
+        on the terminal task so Workstacean's effect-domain interceptor can
+        publish them as ``world.state.delta`` events.
+        """
+        async with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None:
+                return
+            record.deltas.append(delta)
 
     async def cancel_if_not_terminal(self, task_id: str) -> TaskRecord | None:
         """Atomically cancel a task iff it's not already terminal.
@@ -230,14 +257,36 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _terminal_artifact_parts(record: TaskRecord) -> list[dict]:
+    """Build the terminal artifact's ``parts`` list: the accumulated text plus
+    a worldstate-delta DataPart if any deltas were observed during the run.
+
+    Workstacean's A2A executor scans artifact parts for DataParts carrying
+    ``metadata.mimeType = WORLDSTATE_DELTA_MIME`` and surfaces the payload
+    through its effect-domain interceptor. Emitting an empty delta list
+    would be confusing, so the DataPart is added only when non-empty.
+    """
+    parts: list[dict] = []
+    if record.accumulated_text:
+        parts.append({"kind": "text", "text": record.accumulated_text})
+    if record.deltas:
+        parts.append({
+            "kind": "data",
+            "data": {"deltas": list(record.deltas)},
+            "metadata": {"mimeType": WORLDSTATE_DELTA_MIME},
+        })
+    return parts
+
+
 def _task_to_response(record: TaskRecord) -> dict:
     resp: dict[str, Any] = {
         "id": record.id,
         "contextId": record.context_id,
         "status": {"state": record.state, "timestamp": record.updated_at},
     }
-    if record.accumulated_text:
-        resp["artifacts"] = [{"parts": [{"kind": "text", "text": record.accumulated_text}]}]
+    parts = _terminal_artifact_parts(record)
+    if parts:
+        resp["artifacts"] = [{"parts": parts}]
     if record.error_message:
         resp["status"]["message"] = {
             "role": "agent",
@@ -364,12 +413,14 @@ async def _deliver_webhook(record: TaskRecord, push_config: PushNotificationConf
     Skips retry on 4xx (client error — retrying won't help).
     """
     payload = _build_status_event(record)
-    if record.state == COMPLETED and record.accumulated_text:
-        payload["artifact"] = {
-            "parts": [{"kind": "text", "text": record.accumulated_text}],
-            "append": False,
-            "last_chunk": True,
-        }
+    if record.state == COMPLETED:
+        parts = _terminal_artifact_parts(record)
+        if parts:
+            payload["artifact"] = {
+                "parts": parts,
+                "append": False,
+                "last_chunk": True,
+            }
 
     headers = {"Content-Type": "application/json"}
     if push_config.token:
@@ -448,6 +499,12 @@ async def _run_task_background(
             elif event_type in ("tool_start", "tool_end"):
                 # Status update only — no new artifact text
                 await _store.update_state(task_id, WORKING, accumulated_text=accumulated)
+
+            elif event_type == "delta":
+                # Worldstate-delta emitted by a tool that mutated shared state.
+                # Stored on the record and emitted on the terminal artifact.
+                if isinstance(payload, dict):
+                    await _store.add_delta(task_id, payload)
 
             elif event_type == "done":
                 record = await _store.update_state(
@@ -661,6 +718,14 @@ def register_a2a_routes(
                         },
                     )
 
+                elif event_type == "delta":
+                    # Worldstate-delta: accumulated on the record, emitted on
+                    # the terminal artifact's DataPart. No mid-run SSE frame
+                    # — the Workstacean executor reads deltas from the final
+                    # Task artifacts, not status updates.
+                    if isinstance(payload, dict):
+                        await _store.add_delta(task_id, payload)
+
                 elif event_type == "done":
                     final_text = payload or accumulated
                     r = await _store.update_state(task_id, COMPLETED, accumulated_text=final_text)
@@ -673,7 +738,7 @@ def register_a2a_routes(
                             "contextId": context_id,
                             "status": {"state": COMPLETED, "timestamp": _now_iso()},
                             "artifacts": [
-                                {"parts": [{"kind": "text", "text": final_text}], "append": False, "last_chunk": True}
+                                {"parts": _terminal_artifact_parts(r) if r else [{"kind": "text", "text": final_text}], "append": False, "last_chunk": True}
                             ],
                         },
                     )
