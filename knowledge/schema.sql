@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS bug_patterns (
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
     resolved INTEGER DEFAULT 0,
-    resolution TEXT                        -- how it was fixed (for future reference)
+    resolution TEXT,                       -- how it was fixed (for future reference)
+    related_features TEXT                  -- JSON array of feature IDs for cross-feature clustering
 );
 
 -- Release Notes: generated changelogs
@@ -63,4 +64,18 @@ CREATE TABLE IF NOT EXISTS apps (
     server_url TEXT,
     last_checked_at TEXT,
     config TEXT                            -- JSON config
+);
+
+-- Regression Tests: scripted checks tied to known bug patterns
+CREATE TABLE IF NOT EXISTS regression_tests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    steps TEXT,                            -- JSON array of steps
+    expected_result TEXT,
+    related_bug TEXT,                      -- bug pattern title or id
+    app_name TEXT,
+    last_run TEXT,
+    last_result TEXT DEFAULT 'pending',    -- pending/pass/fail
+    created_at TEXT NOT NULL
 );

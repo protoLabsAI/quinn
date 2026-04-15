@@ -290,13 +290,15 @@ async def release_notes(
 # ---------------------------------------------------------------------------
 
 def create_qa_memory_tool(store=None):
-    """Factory: creates qa_memory tool with its own QAKnowledgeStore.
+    """Factory: creates qa_memory tool backed by the canonical KnowledgeStore.
 
-    The store parameter is ignored — QAMemoryTool always uses QAKnowledgeStore
-    (not the base KnowledgeStore from the middleware, which has different methods).
+    If ``store`` is provided (e.g. from middleware), the tool shares that
+    store; otherwise it instantiates its own. Both code paths now hit the
+    same schema — the divergent QAKnowledgeStore has been removed (see #7).
     """
-    from tools.qa_memory import QAKnowledgeStore, QAMemoryTool
-    _tool = QAMemoryTool(QAKnowledgeStore())
+    from knowledge.store import KnowledgeStore
+    from tools.qa_memory import QAMemoryTool
+    _tool = QAMemoryTool(store or KnowledgeStore())
 
     @tool
     async def qa_memory(
@@ -310,14 +312,13 @@ def create_qa_memory_tool(store=None):
         app_name: str = "",
         severity: str = "info",
         category: str = "",
+        pattern: str = "",
         resolution: str = "",
         steps: str = "",
         expected_result: str = "",
         related_bug: str = "",
         related_features: str = "",
         findings: str = "",
-        commits_included: str = "",
-        prs_included: str = "",
         query: str = "",
         limit: int = 10,
     ) -> str:
@@ -335,10 +336,10 @@ def create_qa_memory_tool(store=None):
             action=action, entry_type=entry_type, title=title, summary=summary,
             description=description, content=content, version=version,
             app_name=app_name, severity=severity, category=category,
-            resolution=resolution, steps=steps, expected_result=expected_result,
-            related_bug=related_bug, related_features=related_features,
-            findings=findings, commits_included=commits_included,
-            prs_included=prs_included, query=query, limit=limit,
+            pattern=pattern, resolution=resolution, steps=steps,
+            expected_result=expected_result, related_bug=related_bug,
+            related_features=related_features, findings=findings,
+            query=query, limit=limit,
         )
 
     return qa_memory
