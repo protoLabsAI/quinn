@@ -109,23 +109,25 @@ jobs:
 
           # Merge strategy:
           # - Try `--auto` first: GitHub waits for required checks and
-            # merges when they pass. Happy path when CodeRabbit / other
+          #   merges when they pass. Happy path when CodeRabbit / other
           #   checks are still pending.
-          # - If `--auto` fails with "clean status", the PR has no
-          #   pending checks and is immediately mergeable — GitHub
-          #   rejects `--auto` in that case. Fall back to a direct
-          #   squash merge.
+          # - If `--auto` fails for any reason, fall back to a direct
+          #   squash merge. GitHub rejects `--auto` in several distinct
+          #   cases that are all fine for this workflow's purposes:
+          #     * "clean status" — PR is already mergeable, no checks
+          #       to wait on
+          #     * "Protected branch rules not configured" — no branch
+          #       protection, so auto-merge has nothing to gate on
+          #     * (future) any other reason — the direct merge below
+          #       either succeeds or fails loud with a real error.
           # - `--admin` is avoided entirely; it breaks when checks are
           #   "expected" but haven't started (protoPen PR #18 history).
           if ! gh pr merge "${PR_URL}" --squash --auto 2>/tmp/merge-err; then
-            if grep -q "clean status" /tmp/merge-err; then
-              echo "No pending checks — merging directly."
-              gh pr merge "${PR_URL}" --squash
-            else
-              echo "Merge enable failed:"
-              cat /tmp/merge-err
-              exit 1
-            fi
+            echo "Auto-merge not enabled (expected on repos without branch"
+            echo "protection or PRs with no pending checks):"
+            sed 's/^/  /' /tmp/merge-err
+            echo "Falling back to direct squash merge."
+            gh pr merge "${PR_URL}" --squash
           fi
 
           # Poll until the PR is merged (CI must pass first; timeout 10 min)
