@@ -12,6 +12,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import logging
 import os
 import re
 import time
@@ -21,6 +22,12 @@ from typing import Any
 # chat_ui pulls in gradio, which the server needs at runtime but which would
 # otherwise block anyone from importing tiny helpers (e.g. _build_agent_card)
 # out of this module for tests. Keep the import inside _main().
+
+# Module-level logger — used to surface uncaught exceptions in the LangGraph
+# stream/invoke code with a full traceback. Without this the A2A handler only
+# sees str(e), which drops the frame location and makes every runtime bug a
+# guess-and-check session. uvicorn/docker-logs pick this up on stderr.
+log = logging.getLogger("quinn.server")
 
 # ---------------------------------------------------------------------------
 # Agent setup
@@ -440,6 +447,13 @@ async def _chat_langgraph_stream(message: str, session_id: str):
         yield ("done", _strip_think(accumulated_text))
 
     except Exception as e:
+        # Log with traceback so the frame location reaches docker logs.
+        # The A2A handler only gets str(e) as the task's error_message,
+        # which is enough for the client but useless for debugging.
+        log.exception(
+            "[quinn-a2a-stream] unhandled exception for session=%s: %s",
+            session_id, e,
+        )
         yield ("error", str(e))
     finally:
         tracing.end_trace()
@@ -473,6 +487,13 @@ async def _chat_langgraph(message: str, session_id: str) -> list[dict[str, Any]]
         response = _strip_think(response)
         return [{"role": "assistant", "content": response}]
     except Exception as e:
+        # Surface the traceback to stderr. The Gradio UI only receives the
+        # short **Error:** message — the frame location stays in docker logs
+        # where it's useful for debugging.
+        log.exception(
+            "[quinn-chat-lg] unhandled exception for session=%s: %s",
+            session_id, e,
+        )
         return [{"role": "assistant", "content": f"**Error:** {e}"}]
     finally:
         tracing.end_trace()
