@@ -1,6 +1,6 @@
 [project]
 name = "quinn"
-version = "0.1.5"
+version = "0.1.6"
 description = "Quinn — protoLabs QA engineer + release manager agent"
 requires-python = ">=3.11"
 
