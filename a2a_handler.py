@@ -63,6 +63,16 @@ _TERMINAL = {COMPLETED, FAILED, CANCELED}
 # Ref: protoWorkstacean/docs/extensions/worldstate-delta-v1.md
 WORLDSTATE_DELTA_MIME = "application/vnd.protolabs.worldstate-delta+json"
 
+# Cost-v1: token usage + duration on the terminal artifact. Workstacean's
+# A2AExecutor (protoWorkstacean#372) extracts this onto result.data so the
+# cost interceptor can publish autonomous.cost.{agent}.{skill} samples.
+# Schema: {"usage": {"input_tokens": int, "output_tokens": int,
+#                    "total_tokens": int},
+#          "durationMs": int,
+#          "costUsd": float?}
+# Ref: protoWorkstacean/docs/extensions/cost-v1.md
+COST_MIME = "application/vnd.protolabs.cost-v1+json"
+
 # ── Data types ────────────────────────────────────────────────────────────────
 
 
@@ -102,6 +112,11 @@ class TaskRecord:
     # [{"domain": "protomaker_board", "path": "data.backlog_count",
     #   "op": "inc", "value": 1}, ...]
     deltas: list[dict] = field(default_factory=list)
+    # Token usage accumulated across every LLM call in the run. Emitted on
+    # the terminal artifact under the cost-v1 MIME so Workstacean's
+    # cost interceptor (protoWorkstacean#372) can record per-skill samples.
+    # Shape: {"input_tokens": int, "output_tokens": int, "total_tokens": int}
+    usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
     # ── asyncio primitives (not serialised) ──
     _cancel_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _update_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -199,6 +214,26 @@ class A2ATaskStore:
                 return
             record.deltas.append(delta)
 
+    async def add_usage(self, task_id: str, input_tokens: int, output_tokens: int) -> None:
+        """Accumulate LLM token usage for the task.
+
+        Called from the producer on every ``on_chat_model_end`` event. The
+        running totals are emitted on the terminal artifact under the
+        ``cost-v1`` MIME so Workstacean's cost interceptor can record
+        per-skill samples (protoWorkstacean#372).
+        """
+        if input_tokens <= 0 and output_tokens <= 0:
+            return
+        async with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None:
+                return
+            record.usage["input_tokens"] += int(input_tokens)
+            record.usage["output_tokens"] += int(output_tokens)
+            record.usage["total_tokens"] = (
+                record.usage["input_tokens"] + record.usage["output_tokens"]
+            )
+
     async def cancel_if_not_terminal(self, task_id: str) -> TaskRecord | None:
         """Atomically cancel a task iff it's not already terminal.
 
@@ -282,13 +317,20 @@ def _now_iso() -> str:
 
 
 def _terminal_artifact_parts(record: TaskRecord) -> list[dict]:
-    """Build the terminal artifact's ``parts`` list: the accumulated text plus
-    a worldstate-delta DataPart if any deltas were observed during the run.
+    """Build the terminal artifact's ``parts`` list: accumulated text plus
+    DataParts for any A2A extension payloads observed during the run.
 
     Workstacean's A2A executor scans artifact parts for DataParts carrying
-    ``metadata.mimeType = WORLDSTATE_DELTA_MIME`` and surfaces the payload
-    through its effect-domain interceptor. Emitting an empty delta list
-    would be confusing, so the DataPart is added only when non-empty.
+    one of these ``metadata.mimeType`` values and surfaces the payload
+    through the matching interceptor:
+
+    - ``WORLDSTATE_DELTA_MIME`` — effect-domain interceptor republishes
+      observed mutations as ``world.state.delta`` events.
+    - ``COST_MIME`` — cost interceptor records per-skill token + duration
+      samples (protoWorkstacean#372).
+
+    Each DataPart is emitted only when there's something to report, so an
+    empty payload doesn't pollute the artifact.
     """
     parts: list[dict] = []
     if record.accumulated_text:
@@ -299,7 +341,45 @@ def _terminal_artifact_parts(record: TaskRecord) -> list[dict]:
             "data": {"deltas": list(record.deltas)},
             "metadata": {"mimeType": WORLDSTATE_DELTA_MIME},
         })
+    cost_data = _cost_payload(record)
+    if cost_data is not None:
+        parts.append({
+            "kind": "data",
+            "data": cost_data,
+            "metadata": {"mimeType": COST_MIME},
+        })
     return parts
+
+
+def _cost_payload(record: TaskRecord) -> dict | None:
+    """Build the cost-v1 payload for a terminal record, or None if no
+    cost-relevant data is available.
+
+    Always includes ``durationMs`` (cheap to compute from created_at →
+    updated_at) when usage was tracked. ``costUsd`` is omitted for now —
+    LiteLLM exposes per-call cost in its callback hooks but Quinn's
+    runtime doesn't capture it yet; consumers of cost-v1 can derive cost
+    from usage + their own per-model rates, or wait for a follow-up that
+    plumbs ``response_cost`` through.
+    """
+    usage = record.usage
+    if not usage or usage.get("total_tokens", 0) <= 0:
+        return None
+    payload: dict = {"usage": dict(usage)}
+    duration_ms = _duration_ms(record)
+    if duration_ms is not None:
+        payload["durationMs"] = duration_ms
+    return payload
+
+
+def _duration_ms(record: TaskRecord) -> int | None:
+    """Compute task duration from created_at → updated_at ISO timestamps."""
+    try:
+        start = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+        return int((end - start).total_seconds() * 1000)
+    except (ValueError, AttributeError):
+        return None
 
 
 def _task_to_response(record: TaskRecord) -> dict:
@@ -654,6 +734,17 @@ async def _run_task_background(
                 # Stored on the record and emitted on the terminal artifact.
                 if isinstance(payload, dict):
                     await _store.add_delta(task_id, payload)
+
+            elif event_type == "usage":
+                # Token usage from on_chat_model_end. Accumulated on the
+                # record and emitted on the terminal artifact under the
+                # cost-v1 MIME for Workstacean's cost interceptor.
+                if isinstance(payload, dict):
+                    await _store.add_usage(
+                        task_id,
+                        input_tokens=payload.get("input_tokens", 0),
+                        output_tokens=payload.get("output_tokens", 0),
+                    )
 
             elif event_type == "done":
                 record = await _store.update_state(
