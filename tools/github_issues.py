@@ -83,15 +83,34 @@ class GitHubIssuesTool(Tool):
                 },
                 "repo": {
                     "type": "string",
-                    "description": "Repository in owner/name format.",
+                    "description": "Repository in owner/name format (e.g. 'protoLabsAI/protoMaker').",
                 },
             },
-            "required": ["action"],
+            "required": ["action", "repo"],
         }
 
     async def execute(self, **kwargs: Any) -> str:
         action = kwargs["action"]
-        repo = kwargs.get("repo") or get_repo()
+        # Fail loudly on missing repo (see pr_inspector / github_actions for
+        # the same guard). Falling through as None used to crash asyncio's
+        # subprocess machinery with "expected str, bytes or os.PathLike
+        # object, not NoneType" — useless for debugging without a traceback.
+        repo = kwargs.get("repo")
+        if not repo:
+            env_repo = get_repo()
+            if env_repo:
+                return (
+                    f"Error: github_issues requires an explicit `repo` argument on every call. "
+                    f"The GITHUB_REPO env var is set to '{env_repo}' but that is only used as a "
+                    f"last-resort fallback for internal scripts — agent dispatches must pass repo "
+                    f"explicitly from the task context they were given."
+                )
+            return (
+                "Error: github_issues requires a `repo` argument (owner/name format). "
+                "Extract the repo from the task context in the incoming message."
+            )
+        if "/" not in repo or repo.count("/") != 1:
+            return f"Error: `repo` must be in owner/name format, got '{repo}'."
         number = kwargs.get("number")
 
         if action == "list_open":

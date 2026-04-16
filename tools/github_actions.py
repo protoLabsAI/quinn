@@ -73,15 +73,36 @@ class GitHubActionsTool(Tool):
                 },
                 "repo": {
                     "type": "string",
-                    "description": "Repository in owner/name format.",
+                    "description": "Repository in owner/name format (e.g. 'protoLabsAI/protoMaker').",
                 },
             },
-            "required": ["action"],
+            "required": ["action", "repo"],
         }
 
     async def execute(self, **kwargs: Any) -> str:
         action = kwargs["action"]
-        repo = kwargs.get("repo") or get_repo()
+        # Fail loudly on missing repo. get_repo() reads GITHUB_REPO but the
+        # deployed container doesn't set it, so a missing arg used to fall
+        # through as None and crash asyncio.create_subprocess_exec with
+        # "expected str, bytes or os.PathLike object, not NoneType" —
+        # unreadable without a traceback. Mirror the pr_inspector guard (#74)
+        # so the agent sees a clear error and retries with repo= set.
+        repo = kwargs.get("repo")
+        if not repo:
+            env_repo = get_repo()
+            if env_repo:
+                return (
+                    f"Error: github_actions requires an explicit `repo` argument on every call. "
+                    f"The GITHUB_REPO env var is set to '{env_repo}' but that is only used as a "
+                    f"last-resort fallback for internal scripts — agent dispatches must pass repo "
+                    f"explicitly from the task context they were given."
+                )
+            return (
+                "Error: github_actions requires a `repo` argument (owner/name format). "
+                "Extract the repo from the task context in the incoming message."
+            )
+        if "/" not in repo or repo.count("/") != 1:
+            return f"Error: `repo` must be in owner/name format, got '{repo}'."
         ref = kwargs.get("ref") or "dev"
         workflow = kwargs.get("workflow", "")
         run_id = kwargs.get("run_id")
