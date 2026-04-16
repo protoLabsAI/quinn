@@ -53,8 +53,15 @@ _enabled = False
 # swallow the raised ValueError in trace_session's finally block;
 # this filter just stops OTel from spamming docker logs about it.
 # Quinn #43.
+#
+# Note: OTel logs this as `_logger.error("Failed to detach context",
+# exc_info=True)` — the actual "was created in a different Context"
+# string lives only in `exc_info`, NOT in the formatted message. So
+# match on the message text instead. The detach-context call site
+# only fires this log line for the cross-context case in practice,
+# so the filter is precise enough to leave other OTel errors alone.
 logging.getLogger("opentelemetry.context").addFilter(
-    lambda record: "was created in a different Context" not in record.getMessage()
+    lambda record: "Failed to detach context" not in record.getMessage()
 )
 
 # Holds the current Langfuse trace_id for the active async context. Audit

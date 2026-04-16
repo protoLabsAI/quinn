@@ -26,4 +26,10 @@ def create_llm(config: LangGraphConfig) -> ChatOpenAI:
         model=config.model_name,
         temperature=config.temperature,
         max_tokens=config.max_tokens,
+        # Forces token-usage info onto the final streaming chunk so
+        # `astream_events(v2)` populates `output.usage_metadata` on
+        # `on_chat_model_end`. Without this, streaming chunks arrive as
+        # AIMessageChunks with usage_metadata=None and we can't emit
+        # the cost-v1 DataPart on the terminal artifact (quinn#56).
+        stream_usage=True,
     )
