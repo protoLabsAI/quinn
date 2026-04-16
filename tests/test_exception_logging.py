@@ -12,11 +12,12 @@ are debuggable from `docker logs quinn` alone.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import sys
 import types
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 
 def _stub_langchain_core():
@@ -45,10 +46,18 @@ def _stub_tracing():
     """Stub the tracing module to avoid langfuse imports + side effects."""
     if "tracing" in sys.modules:
         return
+    import contextlib
+
     tracing = types.ModuleType("tracing")
-    tracing.start_trace = lambda **kw: None
-    tracing.end_trace = lambda: None
+
+    @contextlib.asynccontextmanager
+    async def _noop_session(*args, **kwargs):
+        yield None
+
+    tracing.trace_session = _noop_session
+    tracing.flush = lambda: None
     tracing.is_enabled = lambda: False
+    tracing.current_trace_id = lambda: ""
     sys.modules["tracing"] = tracing
 
 
@@ -56,7 +65,8 @@ _stub_langchain_core()
 _stub_tracing()
 
 
-def test_chat_langgraph_stream_logs_traceback_on_exception(caplog):
+@pytest.mark.asyncio
+async def test_chat_langgraph_stream_logs_traceback_on_exception(caplog):
     """_chat_langgraph_stream catches Exception and yields str(e) to the
     A2A handler. It MUST also log the full traceback to stderr first —
     otherwise docker logs shows only the access-log lines and the frame
@@ -65,25 +75,21 @@ def test_chat_langgraph_stream_logs_traceback_on_exception(caplog):
 
     caplog.set_level(logging.ERROR, logger="quinn.server")
 
-    async def _run():
-        async def _exploding_events(*args, **kwargs):
-            # Shape the raise so it mirrors the production failure: a path
-            # op getting None. Any exception exercises the log path.
-            raise TypeError(
-                "expected str, bytes or os.PathLike object, not NoneType"
-            )
-            yield  # make this an async generator even though we raise first
+    async def _exploding_events(*args, **kwargs):
+        # Shape the raise so it mirrors the production failure: a path
+        # op getting None. Any exception exercises the log path.
+        raise TypeError(
+            "expected str, bytes or os.PathLike object, not NoneType"
+        )
+        yield  # make this an async generator even though we raise first
 
-        fake_graph = MagicMock()
-        fake_graph.astream_events = _exploding_events
+    fake_graph = MagicMock()
+    fake_graph.astream_events = _exploding_events
 
-        events = []
-        with patch("server._graph", fake_graph):
-            async for kind, payload in _chat_langgraph_stream("hi", "s-err"):
-                events.append((kind, payload))
-        return events
-
-    events = asyncio.get_event_loop().run_until_complete(_run())
+    events = []
+    with patch("server._graph", fake_graph):
+        async for kind, payload in _chat_langgraph_stream("hi", "s-err"):
+            events.append((kind, payload))
 
     # The error event still reaches the A2A handler so the task transitions
     # to FAILED with a readable message.
@@ -101,23 +107,21 @@ def test_chat_langgraph_stream_logs_traceback_on_exception(caplog):
     assert rec.exc_info[0] is TypeError
 
 
-def test_chat_langgraph_non_stream_logs_traceback_on_exception(caplog):
+@pytest.mark.asyncio
+async def test_chat_langgraph_non_stream_logs_traceback_on_exception(caplog):
     """Same guarantee on the non-streaming path that Gradio chat uses."""
     from server import _chat_langgraph
 
     caplog.set_level(logging.ERROR, logger="quinn.server")
 
-    async def _run():
-        fake_graph = MagicMock()
-        fake_graph.ainvoke = AsyncMock(
-            side_effect=TypeError(
-                "expected str, bytes or os.PathLike object, not NoneType"
-            )
+    fake_graph = MagicMock()
+    fake_graph.ainvoke = AsyncMock(
+        side_effect=TypeError(
+            "expected str, bytes or os.PathLike object, not NoneType"
         )
-        with patch("server._graph", fake_graph):
-            return await _chat_langgraph("hi", "s-err")
-
-    result = asyncio.get_event_loop().run_until_complete(_run())
+    )
+    with patch("server._graph", fake_graph):
+        result = await _chat_langgraph("hi", "s-err")
 
     # Caller (Gradio) still gets a readable assistant message
     assert "**Error:**" in result[0]["content"]

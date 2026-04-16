@@ -1,29 +1,62 @@
 """Langfuse tracing for Quinn.
 
-Provides trace/span context for LLM calls and tool executions.
-Compatible with Langfuse 4.x API (start_as_current_observation).
-Falls back silently if Langfuse is not configured.
+Primary entry point is ``trace_session`` — an async context manager that
+opens a Langfuse observation and makes it the current parent for any
+observations created inside its scope (including tool calls, LLM calls
+from the LiteLLM gateway, and nested subagent sessions).
+
+Hierarchy
+─────────
+A typical A2A-submitted task produces a trace like::
+
+    a2a.task (session root)
+    ├── agent-turn (LangGraph run)
+    │   ├── tool:board_monitor
+    │   ├── tool:github_issues
+    │   └── litellm-acompletion            ← from the gateway callback
+    └── subagent:reporter                  ← if the reporter is dispatched
+        ├── tool:qa_memory
+        └── litellm-acompletion
+
+Every span shares the same Langfuse trace_id, so clicking one surfaces the
+whole run. The trace_id is also stamped onto every audit-log entry via
+``current_trace_id()`` so operators can cross-reference a JSONL line to
+the Langfuse UI without grep-archaeology.
+
+Graceful degrade
+────────────────
+When Langfuse isn't configured (or its client errors), every helper in
+this module is a no-op. The agent continues; tracing just doesn't land.
 """
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import os
-from typing import Any
+from typing import Any, AsyncIterator
 
 _langfuse = None
 _enabled = False
 
-# Track current trace ID for audit log cross-referencing
-_trace_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("_trace_id_ctx", default="")
+# Holds the current Langfuse trace_id for the active async context. Audit
+# logging + error handlers read this to cross-reference records back to
+# the trace that produced them.
+_trace_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_quinn_trace_id", default="",
+)
 
 
-def init():
+def init() -> None:
+    """Connect to Langfuse if LANGFUSE_{PUBLIC,SECRET}_KEY are set. Idempotent."""
     global _langfuse, _enabled
 
     public_key = os.environ.get("LANGFUSE_PUBLIC_KEY")
     secret_key = os.environ.get("LANGFUSE_SECRET_KEY")
-    host = os.environ.get("LANGFUSE_HOST") or os.environ.get("LANGFUSE_URL", "http://host.docker.internal:3001")
+    host = (
+        os.environ.get("LANGFUSE_HOST")
+        or os.environ.get("LANGFUSE_URL", "http://host.docker.internal:3001")
+    )
 
     if not public_key or not secret_key:
         print("[tracing] Langfuse not configured. Tracing disabled.")
@@ -31,6 +64,7 @@ def init():
 
     try:
         from langfuse import Langfuse
+
         _langfuse = Langfuse(
             public_key=public_key, secret_key=secret_key, host=host,
         )
@@ -46,18 +80,46 @@ def is_enabled() -> bool:
     return _enabled
 
 
-def start_trace(session_id: str, name: str = "quinn-chat", metadata: dict | None = None) -> Any:
-    """Start a new trace for a chat session."""
-    if not _enabled:
-        return None
+def current_trace_id() -> str:
+    """Return the trace_id of the currently-active session (or empty)."""
+    return _trace_id_ctx.get()
 
+
+@contextlib.asynccontextmanager
+async def trace_session(
+    session_id: str,
+    name: str = "quinn-session",
+    metadata: dict | None = None,
+) -> AsyncIterator[Any]:
+    """Open a session-level Langfuse observation that child observations nest under.
+
+    Any ``_langfuse.start_observation(...)`` call (including those made by
+    ``trace_tool_call`` below) becomes a child of this span for the duration
+    of the ``async with`` block.
+
+    The block always runs — if Langfuse isn't configured or raises on setup,
+    the manager yields None and proceeds. Never let tracing failures cascade
+    into the agent's execution path.
+
+    Usage::
+
+        async with tracing.trace_session(session_id, name="a2a.task",
+                                         metadata={"task_id": tid}):
+            ... # LangGraph run, tool calls, subagent dispatches
+            ... # all land as children of this span
+
+    ``session_id`` is threaded into both the metadata and the Langfuse
+    contextvar so audit records created inside the scope can be cross-
+    referenced to the trace.
+    """
+    if not _enabled or _langfuse is None:
+        yield None
+        return
+
+    ctx = None
+    token = None
     try:
-        from langfuse import Langfuse
-        trace_id = Langfuse.create_trace_id(seed=session_id)
-        _trace_id_ctx.set(trace_id)
-
-        # Start a root observation that acts as our trace
-        span = _langfuse.start_as_current_observation(
+        ctx = _langfuse.start_as_current_observation(
             name=name,
             metadata={
                 **(metadata or {}),
@@ -65,68 +127,46 @@ def start_trace(session_id: str, name: str = "quinn-chat", metadata: dict | None
                 "tags": ["quinn"],
             },
         )
-        return span
+        span = ctx.__enter__()
+        trace_id = getattr(span, "trace_id", "") or getattr(span, "id", "")
+        token = _trace_id_ctx.set(trace_id)
+        yield span
     except Exception as e:
-        print(f"[tracing] start_trace failed: {e}")
-        return None
-
-
-def end_trace():
-    """End the current trace."""
-    if not _enabled:
-        return
-    try:
-        _langfuse.flush()
-    except Exception:
-        pass
-    _trace_id_ctx.set("")
-
-
-def trace_llm_call(
-    model: str, messages: list[dict], response_content: str | None,
-    response_tool_calls: list | None = None,
-    tokens_input: int = 0, tokens_output: int = 0,
-    duration_ms: int = 0, finish_reason: str = "",
-    error: str | None = None, metadata: dict | None = None,
-):
-    """Log an LLM call as a generation observation."""
-    if not _enabled:
-        return None
-
-    try:
-        gen = _langfuse.start_observation(
-            name="llm-call",
-            as_type="generation",
-            model=model,
-            input=messages,
-            output=response_content or "",
-            metadata={
-                **(metadata or {}),
-                "finish_reason": finish_reason,
-                "tool_calls": len(response_tool_calls) if response_tool_calls else 0,
-                **({"error": error} if error else {}),
-            },
-            usage_details={
-                "input": tokens_input,
-                "output": tokens_output,
-                "total": tokens_input + tokens_output,
-            },
-            level="ERROR" if error else "DEFAULT",
-        )
-        gen.end()
-        return gen
-    except Exception:
-        return None
+        # Tracing must never break the agent. Log + continue unscoped.
+        print(f"[tracing] trace_session({name}) error: {e}")
+        yield None
+    finally:
+        if token is not None:
+            try:
+                _trace_id_ctx.reset(token)
+            except Exception:
+                pass
+        if ctx is not None:
+            try:
+                ctx.__exit__(None, None, None)
+            except Exception:
+                pass
 
 
 def trace_tool_call(
-    tool_name: str, args: dict, result: str,
-    duration_ms: int, success: bool, session_id: str = "",
-):
-    """Log a tool execution as a span observation."""
-    if not _enabled:
+    tool_name: str,
+    args: dict,
+    result: str,
+    duration_ms: int,
+    success: bool,
+    session_id: str = "",
+) -> Any:
+    """Log a completed tool execution as a child observation.
+
+    When called inside a ``trace_session`` scope, this nests under the
+    session span automatically — Langfuse's internal current-observation
+    stack threads the parent without explicit wiring.
+    """
+    if not _enabled or _langfuse is None:
         return None
 
+    # Truncate oversize args to keep Langfuse payloads lean. The full args
+    # are already in the audit log for forensic reconstruction.
     safe_args = {}
     for k, v in (args or {}).items():
         sv = str(v)
@@ -137,11 +177,12 @@ def trace_tool_call(
             name=f"tool:{tool_name}",
             as_type="tool",
             input=safe_args,
-            output=result[:1000] if result else "",
+            output=(result or "")[:1000],
             metadata={
                 "duration_ms": duration_ms,
                 "success": success,
                 "session_id": session_id,
+                "trace_id": _trace_id_ctx.get(),
             },
             level="ERROR" if not success else "DEFAULT",
         )
@@ -151,20 +192,26 @@ def trace_tool_call(
         return None
 
 
-def score_trace(name: str, value: float, comment: str = ""):
-    """Score the current trace."""
-    if not _enabled:
+def score_current_trace(name: str, value: float, comment: str = "") -> None:
+    """Attach a numeric score to the currently-active trace.
+
+    Examples:
+        - score_current_trace("tool_success_rate", 1.0 if all_succeeded else 0.0)
+        - score_current_trace("latency_p95_ms", duration_ms)
+        - score_current_trace("verdict", 1.0 if verdict == "PASS" else 0.0,
+                              comment="triage outcome")
+    """
+    if not _enabled or _langfuse is None:
         return
     try:
-        _langfuse.score_current_trace(
-            name=name, value=value, comment=comment,
-        )
+        _langfuse.score_current_trace(name=name, value=value, comment=comment)
     except Exception:
         pass
 
 
-def flush():
-    if _enabled and _langfuse:
+def flush() -> None:
+    """Flush any buffered observations. Call before process exit."""
+    if _enabled and _langfuse is not None:
         try:
             _langfuse.flush()
         except Exception:
