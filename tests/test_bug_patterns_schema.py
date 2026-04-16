@@ -95,10 +95,10 @@ def test_upsert_merges_related_features(tmp_path, monkeypatch) -> None:
     (cross-feature clustering)."""
     import json
 
-    # Route KnowledgeStore._get_db() at a fresh temp DB — no Ollama needed,
+    # Route KnowledgeStore._get_db() at a fresh temp DB — no gateway needed,
     # _store_vector fails gracefully when embeddings are unreachable.
     db_path = tmp_path / "qa.db"
-    store = KnowledgeStore(db_path=db_path, ollama_url="http://unreachable:0")
+    store = KnowledgeStore(db_path=db_path, gateway_url="http://unreachable:0")
 
     # First occurrence: bug seen in feature-1
     assert store.add_bug_pattern(
@@ -147,7 +147,7 @@ def test_upsert_handles_legacy_null_related_features(tmp_path) -> None:
     import json
 
     db_path = tmp_path / "qa.db"
-    store = KnowledgeStore(db_path=db_path, ollama_url="http://unreachable:0")
+    store = KnowledgeStore(db_path=db_path, gateway_url="http://unreachable:0")
 
     # Seed a legacy-shaped row with NULL related_features
     db = store._get_db()

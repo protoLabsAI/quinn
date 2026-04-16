@@ -1,10 +1,17 @@
 """Knowledge store for Quinn QA agent -- SQLite + sqlite-vec backed.
 
 Stores QA reports, bug patterns, release notes, triage log entries, and
-tracked apps with semantic search via Ollama embeddings and sqlite-vec.
+tracked apps with semantic search via the LiteLLM gateway's OpenAI-compatible
+embedding endpoint and sqlite-vec.
+
+Embeddings route through the gateway (``qwen3-embedding`` → Qwen3-Embedding-0.6B)
+so there's no separate Ollama connection to manage and the same model serves
+every agent in the fleet. The gateway caches identical embedding requests so
+repeated search queries pay vector latency once.
 """
 
 import json
+import os
 import sqlite3
 import struct
 import time
@@ -14,9 +21,10 @@ from typing import Any
 
 import httpx
 
-_OLLAMA_URL = "http://host.docker.internal:11434"
-_EMBED_MODEL = "nomic-embed-text"
-_EMBED_DIM = 768
+_GATEWAY_URL = os.environ.get("OPENAI_BASE_URL", "http://gateway:4000/v1")
+_GATEWAY_KEY = os.environ.get("OPENAI_API_KEY", "")
+_EMBED_MODEL = "qwen3-embedding"
+_EMBED_DIM = 1024  # Qwen3-Embedding-0.6B native dim (supports Matryoshka truncation)
 _DB_PATH = Path("/sandbox/knowledge/qa.db")
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
@@ -27,11 +35,13 @@ class KnowledgeStore:
     def __init__(
         self,
         db_path: Path = _DB_PATH,
-        ollama_url: str = _OLLAMA_URL,
+        gateway_url: str = _GATEWAY_URL,
+        gateway_key: str = _GATEWAY_KEY,
         model: str = _EMBED_MODEL,
     ):
         self.db_path = db_path
-        self.ollama_url = ollama_url
+        self.gateway_url = gateway_url.rstrip("/")
+        self.gateway_key = gateway_key
         self.model = model
         self._db: sqlite3.Connection | None = None
 
@@ -56,7 +66,6 @@ class KnowledgeStore:
             # columns need ALTER TABLE to reach already-initialized DBs.
             self._migrate_schema(db)
 
-            # Create vector tables
             db.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_vec
                 USING vec0(embedding float[{_EMBED_DIM}])
@@ -95,14 +104,27 @@ class KnowledgeStore:
         db.commit()
 
     def _embed(self, text: str) -> list[float] | None:
+        """Fetch an embedding via the gateway's OpenAI-compatible endpoint.
+
+        Returns None on any failure — callers treat that as "skip the vector
+        insert but keep the relational row." The agent never blocks on
+        embedding availability.
+        """
         try:
+            headers = {"Content-Type": "application/json"}
+            if self.gateway_key:
+                headers["Authorization"] = f"Bearer {self.gateway_key}"
             resp = httpx.post(
-                f"{self.ollama_url}/api/embeddings",
-                json={"model": self.model, "prompt": text[:2000]},
+                f"{self.gateway_url}/embeddings",
+                json={"model": self.model, "input": text[:2000]},
+                headers=headers,
                 timeout=10,
             )
             resp.raise_for_status()
-            return resp.json()["embedding"]
+            data = resp.json().get("data") or []
+            if not data:
+                return None
+            return data[0].get("embedding")
         except Exception:
             return None
 

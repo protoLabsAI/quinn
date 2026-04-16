@@ -18,7 +18,7 @@ class SubagentDef:
 class LangGraphConfig:
     # Model settings
     model_provider: str = "openai"  # openai (gateway) or vllm
-    model_name: str = "claude-sonnet-4-6"
+    model_name: str = "minimax-m2.7"
     api_base: str = "http://gateway:4000/v1"
     api_key: str = ""  # set via OPENAI_API_KEY env (gateway master key)
     temperature: float = 0.3
@@ -46,7 +46,7 @@ class LangGraphConfig:
 
     # Knowledge store
     knowledge_db_path: str = "/sandbox/knowledge/qa.db"
-    embed_model: str = "nomic-embed-text"
+    embed_model: str = "qwen3-embedding"
     knowledge_top_k: int = 5
 
     @classmethod
