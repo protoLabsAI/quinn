@@ -453,6 +453,14 @@ async def _chat_langgraph_stream(message: str, session_id: str, *, caller_trace:
 
             yield ("done", extract_output(accumulated_raw))
 
+        except GeneratorExit:
+            # Expected: Workstacean's A2AExecutor breaks out of the SSE
+            # `for await` loop after capturing the initial task event,
+            # then hands off to TaskTracker for polling. We re-raise
+            # so Python can finalize the generator cleanly; the OTel
+            # cross-context detach noise this used to emit is silenced
+            # at the logger level in tracing.py. Quinn #43.
+            raise
         except Exception as e:
             # Log with traceback so the frame location reaches docker logs.
             log.exception(
