@@ -39,15 +39,20 @@ Discord Webhooks
 
 ## Deployment
 
-Quinn is deployed as a service in the [`homelab-iac`](https://github.com/protoLabsAI/homelab-iac) AI stack. The image is published to GHCR on every merge to `main` (see `.github/workflows/docker-publish.yml`) and pulled at deploy time:
+Quinn is deployed as a service in the [`homelab-iac`](https://github.com/protoLabsAI/homelab-iac) AI stack. Two complementary GitHub Actions workflows publish the image:
+
+| Workflow | Trigger | Tags published |
+|---|---|---|
+| `docker-publish.yml` | every push to `main` | `:latest`, `:sha-<shortsha>` |
+| `release.yml` | push of a `v*.*.*` tag (cut by `prepare-release.yml`) | `:v<semver>`, `:<major>.<minor>` |
 
 ```
-ghcr.io/protolabsai/quinn:latest
-ghcr.io/protolabsai/quinn:sha-<shortsha>
-ghcr.io/protolabsai/quinn:v<semver>   # version tag pushes
+ghcr.io/protolabsai/quinn:latest      # Watchtower polls this every 60s
+ghcr.io/protolabsai/quinn:sha-<short> # rollback target for any main commit
+ghcr.io/protolabsai/quinn:v<semver>   # immutable, signed semver pin
 ```
 
-To deploy or restart:
+Watchtower auto-pulls `:latest` on the homelab host within ~60s of every main merge, so the deploy is hands-off. Manual restart:
 
 ```bash
 cd ~/dev/homelab-iac/stacks/ai
@@ -56,6 +61,17 @@ infisical run --domain https://secrets.proto-labs.ai/api --env=prod -- docker co
 ```
 
 Quinn's UI is reachable at **http://ava:7873** over the Tailnet (host port) or at `http://quinn:7870` from other services on `ai_default`.
+
+## Releases
+
+Versioning lives in `pyproject.toml` under `[project].version` (single source of truth). Two workflows automate the cadence:
+
+- **`prepare-release.yml`** runs on every non-release PR merge (default `patch` bump) — `python scripts/version.py patch` bumps the version, opens a `prepare-release/vX.Y.Z` PR, auto-merges it once CI passes, then pushes the `vX.Y.Z` tag. `workflow_dispatch` lets the operator pick `patch`/`minor`/`major` manually.
+- **`release.yml`** fires on the tag push: builds + pushes the stable semver Docker tags, creates a GitHub Release with filtered commit notes, and posts Claude-rewritten release notes to Discord via `scripts/post-release-notes.mjs`.
+
+Required repo secrets: `GH_PAT` (repo + workflow scope — the default `GITHUB_TOKEN` can't trigger downstream workflows), `ANTHROPIC_API_KEY` (Haiku rewrite of release notes), `DISCORD_RELEASE_WEBHOOK` (channel webhook). Without `ANTHROPIC_API_KEY` the script posts raw commit bullets; without `DISCORD_RELEASE_WEBHOOK` it prints to stdout.
+
+To bump manually: GitHub Actions → "Prepare Release" → Run workflow → choose `bump` level.
 
 ## Local development
 
