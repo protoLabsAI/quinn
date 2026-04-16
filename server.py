@@ -332,7 +332,21 @@ async def _handle_report_command(session_id: str) -> list[dict[str, Any]]:
 
 
 def _strip_think(text: str) -> str:
+    """Remove reasoning-content markers from model output.
+
+    Handles three shapes that different models emit:
+    - Balanced ``<think>...</think>`` pairs (Claude, DeepSeek, Qwen3)
+    - Orphaned closing ``</think>`` (when opening is in an earlier chunk)
+    - Orphaned opening ``<think>`` with no closing tag (MiniMax M2.x streams
+      reasoning as ``<think>`` and the closing tag can land in a later frame
+      or get dropped entirely; treat everything from the orphan to EOT as
+      reasoning)
+
+    Keeping this liberal is safe: real user-facing content should never
+    contain literal ``<think>`` tags, so stripping them is idempotent.
+    """
     text = re.sub(r"<think>[\s\S]*?</think>", "", text)
+    text = re.sub(r"<think>[\s\S]*$", "", text)
     text = re.sub(r"</think>\s*", "", text)
     return text.strip()
 
