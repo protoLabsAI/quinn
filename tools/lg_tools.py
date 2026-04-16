@@ -8,7 +8,6 @@ from langchain_core.tools import tool
 
 from tools.board_monitor import BoardMonitorTool
 from tools.browser import BrowserTool
-from tools.discord_admin import DiscordAdminTool
 from tools.discord_feed import DiscordFeedTool
 from tools.file_bug import FileBugTool
 from tools.github_actions import GitHubActionsTool
@@ -21,7 +20,6 @@ from tools.release_notes import ReleaseNotesTool
 # Instantiate underlying tool classes (stateless singletons)
 _board_monitor = BoardMonitorTool()
 _browser = BrowserTool()
-_discord_admin = DiscordAdminTool()
 _discord_feed = DiscordFeedTool()
 _file_bug = FileBugTool()
 _github_actions = GitHubActionsTool()
@@ -73,56 +71,6 @@ async def browser(
     """
     return await _browser.execute(
         action=action, url=url, selector=selector, text=text, query=query,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Discord Admin (full server management)
-# ---------------------------------------------------------------------------
-
-@tool
-async def discord_admin(
-    action: str,
-    channel_id: str = "",
-    name: str = "",
-    content: str = "",
-    message_id: str = "",
-    emoji: str = "",
-    category_id: str = "",
-    webhook_url: str = "",
-    topic: str = "",
-    guild_id: str = "",
-    limit: int = 20,
-) -> str:
-    """Manage the Discord server. Quinn has admin permissions.
-
-    Actions:
-    - server_info: Full server overview with channels, categories, members
-    - list_channels: List all channels with IDs
-    - create_channel: Create a text channel (name required, category_id optional)
-    - edit_channel: Edit channel name or topic (channel_id required)
-    - set_channel_topic: Set a channel's topic (channel_id, topic required)
-    - delete_channel: Delete a channel (channel_id required)
-    - create_category: Create a channel category (name required)
-    - edit_category: Rename a category (channel_id, name required)
-    - delete_category: Delete a category (channel_id required)
-    - send_message: Send a message to a channel (channel_id, content required)
-    - read_messages: Read recent messages (channel_id required, limit optional)
-    - delete_message: Delete a message (channel_id, message_id required)
-    - add_reaction: React to a message (channel_id, message_id, emoji required)
-    - remove_reaction: Remove a reaction (channel_id, message_id, emoji required)
-    - list_webhooks: List webhooks (channel_id optional, shows all if omitted)
-    - create_webhook: Create a webhook (channel_id required, name optional)
-    - send_webhook: Send via webhook (webhook_url, content required)
-    - delete_webhook: Delete a webhook (webhook_url required)
-    - list_forums: List forum channels
-    - create_forum_post: Create a forum post (channel_id, name, content required)
-    - reply_to_forum: Reply to a forum thread (channel_id=thread_id, content required)
-    """
-    return await _discord_admin.execute(
-        action=action, channel_id=channel_id, name=name, content=content,
-        message_id=message_id, emoji=emoji, category_id=category_id,
-        webhook_url=webhook_url, topic=topic, guild_id=guild_id, limit=limit,
     )
 
 
@@ -417,7 +365,6 @@ def get_all_tools(qa_store=None):
     return [
         board_monitor,
         browser,
-        discord_admin,
         discord_feed,
         file_bug,
         github_actions,

@@ -347,7 +347,7 @@ def _worldstate_delta_for_tool(tool_name: str, output: str) -> dict | None:
     card.
     """
     # file_bug lands a new feature on the protoMaker board. Matches the
-    # bug_triage / security_triage effect-domain-v1 declarations in
+    # bug_triage effect-domain-v1 declaration in
     # _build_agent_card: +1 on protomaker_board.data.backlog_count.
     if tool_name == "file_bug" and "Bug filed:" in output:
         return {
@@ -765,20 +765,6 @@ def _build_agent_card(host: str) -> dict:
                                     },
                                 ],
                             },
-                            "security_triage": {
-                                "effects": [
-                                    # Lower confidence than bug_triage —
-                                    # low-severity findings sometimes get
-                                    # suppressed rather than filed, and
-                                    # criticals escalate to HITL first.
-                                    {
-                                        "domain": "protomaker_board",
-                                        "path": "data.backlog_count",
-                                        "delta": 1,
-                                        "confidence": 0.7,
-                                    },
-                                ],
-                            },
                         },
                     },
                 },
@@ -814,23 +800,6 @@ def _build_agent_card(host: str) -> dict:
                 "description": "Inspect open PRs: CI status, unresolved review threads, diff summary.",
                 "tags": ["qa", "github"],
                 "examples": ["review open PRs", "check CI on PR #123"],
-            },
-            {
-                "id": "security_triage",
-                "name": "Security Triage",
-                "description": (
-                    "Triage incoming security incidents: CVE reports, vulnerability disclosures, "
-                    "dependabot alerts, auth/permissions failures. Classify severity (critical / "
-                    "high / medium / low), route to the right project, and file a tracked "
-                    "incident on the board. Critical findings escalate to HITL before any "
-                    "autonomous remediation runs."
-                ),
-                "tags": ["security", "triage", "incident"],
-                "examples": [
-                    "triage security issue: CVE-2026-1234 in lodash",
-                    "incoming dependabot alert on protoMaker — what's the severity?",
-                    "security incident: suspicious auth pattern in /api/login",
-                ],
             },
         ],
         "securitySchemes": {
