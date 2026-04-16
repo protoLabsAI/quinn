@@ -38,7 +38,8 @@ def test_agent_card_skills_still_present() -> None:
 
     card = _build_agent_card("quinn:7870")
     skill_ids = {s["id"] for s in card.get("skills", [])}
-    assert {"qa_report", "bug_triage", "pr_review", "security_triage"} <= skill_ids
+    assert {"qa_report", "bug_triage", "pr_review", "board_audit"} <= skill_ids
+    assert "security_triage" not in skill_ids, "security_triage removed — no tool backs it"
 
 
 def test_agent_card_declares_effect_domain_extension() -> None:
@@ -63,21 +64,18 @@ def test_agent_card_declares_effect_domain_extension() -> None:
 
     skills = effect_ext.get("params", {}).get("skills", {})
     # Only skills with directional mutations should be declared.
-    # bug_triage and security_triage both land features on the board.
     assert "bug_triage" in skills
-    assert "security_triage" in skills
+    assert "security_triage" not in skills, "security_triage removed — no tool backs it"
 
-    for skill_name in ("bug_triage", "security_triage"):
-        effects = skills[skill_name].get("effects", [])
-        assert effects, f"{skill_name} declared but has no effects"
-        for effect in effects:
-            # Schema per docs/extensions/effect-domain-v1.md
-            assert "domain" in effect
-            assert "path" in effect
-            assert isinstance(effect.get("delta"), (int, float))
-            confidence = effect.get("confidence")
-            assert isinstance(confidence, (int, float))
-            assert 0.0 <= confidence <= 1.0
+    effects = skills["bug_triage"].get("effects", [])
+    assert effects, "bug_triage declared but has no effects"
+    for effect in effects:
+        assert "domain" in effect
+        assert "path" in effect
+        assert isinstance(effect.get("delta"), (int, float))
+        confidence = effect.get("confidence")
+        assert isinstance(confidence, (int, float))
+        assert 0.0 <= confidence <= 1.0
 
 
 def test_agent_card_does_not_over_declare_read_only_effects() -> None:
