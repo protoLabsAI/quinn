@@ -285,6 +285,73 @@ def test_parse_push_config_rejects_unsafe_url():
     assert cfg is None
 
 
+# ── SSRF allowlist (trusted docker-network hosts) ────────────────────────────
+
+
+def test_ssrf_allowlist_hosts_bypass_check(monkeypatch):
+    """Workstacean registers callbacks at http://workstacean:3000/... —
+    RFC1918 by design on the docker network. Operator-declared trusted
+    hostnames bypass the check without DNS resolution even running
+    (so even if the name doesn't resolve in the test env, the guard
+    still accepts). Quinn #53."""
+    monkeypatch.setenv("PUSH_NOTIFICATION_ALLOWED_HOSTS", "workstacean,automaker-server")
+    import importlib, a2a_handler
+    importlib.reload(a2a_handler)
+    try:
+        assert a2a_handler._is_safe_webhook_url(
+            "http://workstacean:3000/api/a2a/callback/abc"
+        ) is True
+        assert a2a_handler._is_safe_webhook_url(
+            "http://automaker-server:3008/hook"
+        ) is True
+        # Un-listed hostnames still get the full SSRF treatment
+        assert a2a_handler._is_safe_webhook_url("http://evil-internal/x") is False
+    finally:
+        monkeypatch.delenv("PUSH_NOTIFICATION_ALLOWED_HOSTS", raising=False)
+        importlib.reload(a2a_handler)
+
+
+def test_ssrf_allowlist_cidr_bypasses_private_check(monkeypatch):
+    """CIDR allowlist: trust a whole docker subnet at once. The resolved
+    IP falls in the allowlist → accept even though ip.is_private."""
+    monkeypatch.setenv("PUSH_NOTIFICATION_ALLOWED_CIDRS", "10.0.14.0/24")
+    import importlib, a2a_handler
+    importlib.reload(a2a_handler)
+    try:
+        # IP literal inside the allowlist — accepted despite RFC1918
+        assert a2a_handler._is_safe_webhook_url("http://10.0.14.3/hook") is True
+        # IP literal outside the allowlist — still rejected
+        assert a2a_handler._is_safe_webhook_url("http://10.0.99.1/hook") is False
+    finally:
+        monkeypatch.delenv("PUSH_NOTIFICATION_ALLOWED_CIDRS", raising=False)
+        importlib.reload(a2a_handler)
+
+
+def test_ssrf_allowlist_empty_by_default(monkeypatch):
+    """Default-deny: unset env vars mean no bypass, every RFC1918 still
+    rejected. Locks the posture so a shipped image without the vars
+    set behaves like the pre-allowlist guard."""
+    monkeypatch.delenv("PUSH_NOTIFICATION_ALLOWED_HOSTS", raising=False)
+    monkeypatch.delenv("PUSH_NOTIFICATION_ALLOWED_CIDRS", raising=False)
+    import importlib, a2a_handler
+    importlib.reload(a2a_handler)
+    assert a2a_handler._is_safe_webhook_url("http://10.0.14.3/hook") is False
+
+
+def test_ssrf_allowlist_ignores_malformed_cidr(monkeypatch, caplog):
+    """A typo in the CIDR allowlist shouldn't crash init — log it and
+    ignore the bad entry, keeping valid ones."""
+    monkeypatch.setenv("PUSH_NOTIFICATION_ALLOWED_CIDRS", "10.0.14.0/24,not-a-cidr,192.168.1.0/24")
+    import importlib, a2a_handler
+    importlib.reload(a2a_handler)
+    try:
+        assert a2a_handler._is_safe_webhook_url("http://10.0.14.3/") is True
+        assert a2a_handler._is_safe_webhook_url("http://192.168.1.5/") is True
+    finally:
+        monkeypatch.delenv("PUSH_NOTIFICATION_ALLOWED_CIDRS", raising=False)
+        importlib.reload(a2a_handler)
+
+
 # ── Webhook task retention ────────────────────────────────────────────────────
 
 
