@@ -221,16 +221,22 @@ def test_otel_cross_context_detach_error_is_silenced():
 
     try:
         # Simulate the exact noise OTel emits on cross-context detach.
-        otel_log.error(
-            "Failed to detach context: <Token var=<ContextVar name='current_context' "
-            "default={} at 0x...> at 0x...> was created in a different Context"
-        )
+        # OTel calls `_logger.error("Failed to detach context", exc_info=True)` —
+        # the actual ValueError text is in exc_info, not the message. Filter
+        # has to match on the message string itself.
+        try:
+            raise ValueError(
+                "<Token var=<ContextVar name='current_context'> at 0x...> "
+                "was created in a different Context"
+            )
+        except ValueError:
+            otel_log.error("Failed to detach context", exc_info=True)
         otel_log.error("Some other unrelated OTel error that should NOT be silenced")
     finally:
         otel_log.removeHandler(handler)
 
     output = handler_buf.getvalue()
-    assert "different Context" not in output, (
+    assert "Failed to detach context" not in output, (
         "filter failed to silence the cross-context detach error"
     )
     assert "unrelated OTel error" in output, (
