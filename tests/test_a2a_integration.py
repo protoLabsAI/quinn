@@ -98,6 +98,26 @@ def test_agent_card_does_not_over_declare_read_only_effects() -> None:
         )
 
 
+def test_agent_card_declares_cost_v1_extension() -> None:
+    """Quinn emits a cost-v1 DataPart on every terminal task that invoked
+    an LLM. The extension must be declared on the card so Workstacean's
+    A2AExecutor (protoWorkstacean#372) knows to extract it onto
+    result.data, where the cost interceptor records per-skill samples."""
+    from server import _build_agent_card
+
+    card = _build_agent_card("quinn:7870")
+    exts = card["capabilities"].get("extensions", [])
+    cost_ext = next(
+        (e for e in exts
+         if e.get("uri") == "https://protolabs.ai/a2a/ext/cost-v1"),
+        None,
+    )
+    assert cost_ext is not None, (
+        "Missing cost-v1 extension declaration — Workstacean's executor "
+        "won't know to extract the cost DataPart."
+    )
+
+
 # ── Worldstate-delta-v1 runtime emission ─────────────────────────────────────
 
 

@@ -717,6 +717,57 @@ def test_build_artifact_event_has_a2a_spec_shape():
     assert evt["append"] is True
 
 
+def test_terminal_artifact_emits_cost_v1_when_usage_tracked():
+    """When the producer reported any LLM token usage, the terminal
+    artifact carries a cost-v1 DataPart with usage + durationMs.
+    Workstacean's A2AExecutor (protoWorkstacean#372) extracts this onto
+    result.data so the cost interceptor records per-skill samples."""
+    from a2a_handler import _terminal_artifact_parts, COST_MIME
+    record = _make_record(state=COMPLETED, accumulated_text="hi")
+    record.usage = {"input_tokens": 1500, "output_tokens": 420, "total_tokens": 1920}
+    parts = _terminal_artifact_parts(record)
+    cost = next((p for p in parts if p.get("metadata", {}).get("mimeType") == COST_MIME), None)
+    assert cost is not None, "cost-v1 DataPart missing"
+    assert cost["data"]["usage"] == {"input_tokens": 1500, "output_tokens": 420, "total_tokens": 1920}
+    assert "durationMs" in cost["data"]
+    assert isinstance(cost["data"]["durationMs"], int)
+
+
+def test_terminal_artifact_omits_cost_v1_when_no_usage():
+    """No tokens tracked → no cost-v1 part. Avoids polluting the artifact
+    with empty payloads on tasks that completed without an LLM call
+    (cancelled before model invoke, fail-fast errors, etc.)."""
+    from a2a_handler import _terminal_artifact_parts, COST_MIME
+    record = _make_record(state=COMPLETED, accumulated_text="hi")
+    # default usage is all zeros
+    parts = _terminal_artifact_parts(record)
+    cost = next((p for p in parts if p.get("metadata", {}).get("mimeType") == COST_MIME), None)
+    assert cost is None
+
+
+@pytest.mark.asyncio
+async def test_store_add_usage_accumulates(store):
+    """add_usage sums across calls — the producer fires it on every
+    on_chat_model_end, so multiple LLM hops in one task contribute to
+    the same cost-v1 artifact."""
+    record = _make_record()
+    await store.create(record)
+    await store.add_usage("test-task-id", input_tokens=100, output_tokens=50)
+    await store.add_usage("test-task-id", input_tokens=200, output_tokens=80)
+    fetched = await store.get("test-task-id")
+    assert fetched.usage == {"input_tokens": 300, "output_tokens": 130, "total_tokens": 430}
+
+
+@pytest.mark.asyncio
+async def test_store_add_usage_ignores_zero_payloads(store):
+    """Some providers report zero on early stream chunks — don't bump."""
+    record = _make_record()
+    await store.create(record)
+    await store.add_usage("test-task-id", input_tokens=0, output_tokens=0)
+    fetched = await store.get("test-task-id")
+    assert fetched.usage == {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+
 def test_task_to_response_has_kind_discriminator():
     """A2A spec: Task objects carry kind='task'. This is what
     message/send / tasks/get / initial stream frame all return."""

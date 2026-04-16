@@ -451,6 +451,20 @@ async def _chat_langgraph_stream(message: str, session_id: str, *, caller_trace:
                         raw = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
                         accumulated_raw += raw
 
+                elif kind == "on_chat_model_end":
+                    # Capture per-call token usage for the cost-v1 DataPart
+                    # the A2A handler emits on the terminal artifact. LangChain
+                    # exposes normalized usage on `output.usage_metadata`
+                    # (input_tokens / output_tokens / total_tokens). Emit a
+                    # `usage` event the handler accumulates onto the record.
+                    output = event.get("data", {}).get("output")
+                    usage = getattr(output, "usage_metadata", None) if output else None
+                    if usage:
+                        yield ("usage", {
+                            "input_tokens": int(usage.get("input_tokens", 0) or 0),
+                            "output_tokens": int(usage.get("output_tokens", 0) or 0),
+                        })
+
             yield ("done", extract_output(accumulated_raw))
 
         except GeneratorExit:
@@ -782,6 +796,17 @@ def _build_agent_card(host: str) -> dict:
                             },
                         },
                     },
+                },
+                # Quinn emits a cost-v1 DataPart on the terminal artifact of
+                # every task that invoked an LLM (usage + durationMs from the
+                # captured on_chat_model_end events). Workstacean's A2AExecutor
+                # extracts this onto result.data; the cost interceptor then
+                # publishes autonomous.cost.{systemActor}.{skill} samples.
+                # costUsd is omitted today — see protoWorkstacean#372 for the
+                # extraction side; a Quinn follow-up will plumb LiteLLM's
+                # response_cost through.
+                {
+                    "uri": "https://protolabs.ai/a2a/ext/cost-v1",
                 },
             ],
         },
