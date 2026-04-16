@@ -395,68 +395,66 @@ async def _chat_langgraph_stream(message: str, session_id: str):
     import tracing
     from langchain_core.messages import HumanMessage
 
-    tracing.start_trace(
-        session_id=session_id, name="quinn-a2a-stream",
+    # trace_session opens a parent Langfuse observation and makes it the
+    # current span for the duration of this call. Tool + LLM observations
+    # created inside (AuditMiddleware.trace_tool_call + the LiteLLM gateway
+    # callback) nest under it automatically.
+    async with tracing.trace_session(
+        session_id=session_id,
+        name="quinn-a2a-stream",
         metadata={"message_preview": message[:100]},
-    )
-    try:
-        # thread_id prefix isolates A2A sessions from Gradio chat in the
-        # shared MemorySaver checkpointer. Each A2A contextId gets its own slot.
-        config = {"configurable": {"thread_id": f"a2a:{session_id}"}, "recursion_limit": 200}
-        if _checkpointer:
-            config["checkpointer"] = _checkpointer
+    ):
+        try:
+            # thread_id prefix isolates A2A sessions from Gradio chat in the
+            # shared MemorySaver checkpointer. Each A2A contextId gets its own slot.
+            config = {"configurable": {"thread_id": f"a2a:{session_id}"}, "recursion_limit": 200}
+            if _checkpointer:
+                config["checkpointer"] = _checkpointer
 
-        accumulated_text = ""
+            accumulated_text = ""
 
-        async for event in _graph.astream_events(
-            {"messages": [HumanMessage(content=message)], "session_id": session_id},
-            config=config,
-            version="v2",
-        ):
-            kind = event.get("event", "")
-            name = event.get("name", "")
+            async for event in _graph.astream_events(
+                {"messages": [HumanMessage(content=message)], "session_id": session_id},
+                config=config,
+                version="v2",
+            ):
+                kind = event.get("event", "")
+                name = event.get("name", "")
 
-            if kind == "on_tool_start":
-                tool_input = event.get("data", {}).get("input", "")
-                preview = str(tool_input)[:200] if tool_input else ""
-                yield ("tool_start", f"🔧 {name}: {preview}")
+                if kind == "on_tool_start":
+                    tool_input = event.get("data", {}).get("input", "")
+                    preview = str(tool_input)[:200] if tool_input else ""
+                    yield ("tool_start", f"🔧 {name}: {preview}")
 
-            elif kind == "on_tool_end":
-                output = event.get("data", {}).get("output", "")
-                preview = str(output)[:300] if output else ""
-                yield ("tool_end", f"✅ {name} → {preview}")
-                # Emit worldstate-delta-v1 when a tool with known mutations
-                # succeeds. These are consumed by the A2A handler and emitted
-                # as a DataPart on the terminal task; Workstacean's
-                # effect-domain interceptor republishes them as
-                # world.state.delta bus events so the GOAP planner's cached
-                # snapshot updates without waiting for a poll cycle.
-                delta = _worldstate_delta_for_tool(name, str(output) if output else "")
-                if delta is not None:
-                    yield ("delta", delta)
+                elif kind == "on_tool_end":
+                    output = event.get("data", {}).get("output", "")
+                    preview = str(output)[:300] if output else ""
+                    yield ("tool_end", f"✅ {name} → {preview}")
+                    # worldstate-delta-v1 runtime emission (see helper)
+                    delta = _worldstate_delta_for_tool(name, str(output) if output else "")
+                    if delta is not None:
+                        yield ("delta", delta)
 
-            elif kind == "on_chat_model_stream":
-                chunk = event.get("data", {}).get("chunk")
-                if chunk and hasattr(chunk, "content") and chunk.content:
-                    content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-                    content = _strip_think(content)
-                    if content:
-                        accumulated_text += content
-                        yield ("text", content)
+                elif kind == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                        content = _strip_think(content)
+                        if content:
+                            accumulated_text += content
+                            yield ("text", content)
 
-        yield ("done", _strip_think(accumulated_text))
+            yield ("done", _strip_think(accumulated_text))
 
-    except Exception as e:
-        # Log with traceback so the frame location reaches docker logs.
-        # The A2A handler only gets str(e) as the task's error_message,
-        # which is enough for the client but useless for debugging.
-        log.exception(
-            "[quinn-a2a-stream] unhandled exception for session=%s: %s",
-            session_id, e,
-        )
-        yield ("error", str(e))
-    finally:
-        tracing.end_trace()
+        except Exception as e:
+            # Log with traceback so the frame location reaches docker logs.
+            log.exception(
+                "[quinn-a2a-stream] unhandled exception for session=%s: %s",
+                session_id, e,
+            )
+            yield ("error", str(e))
+        finally:
+            tracing.flush()
 
 
 async def _chat_langgraph(message: str, session_id: str) -> list[dict[str, Any]]:
@@ -464,39 +462,39 @@ async def _chat_langgraph(message: str, session_id: str) -> list[dict[str, Any]]
     import tracing
     from langchain_core.messages import HumanMessage, AIMessage
 
-    tracing.start_trace(session_id=session_id, name="quinn-chat-lg", metadata={"message_preview": message[:100]})
-    try:
-        # Invoke the graph with session-scoped checkpointing
-        config = {"configurable": {"thread_id": f"gradio:{session_id}"}}
-        if _checkpointer:
-            config["checkpointer"] = _checkpointer
+    async with tracing.trace_session(
+        session_id=session_id,
+        name="quinn-chat-lg",
+        metadata={"message_preview": message[:100]},
+    ):
+        try:
+            config = {"configurable": {"thread_id": f"gradio:{session_id}"}}
+            if _checkpointer:
+                config["checkpointer"] = _checkpointer
 
-        result = await _graph.ainvoke(
-            {"messages": [HumanMessage(content=message)], "session_id": session_id},
-            config=config,
-        )
+            result = await _graph.ainvoke(
+                {"messages": [HumanMessage(content=message)], "session_id": session_id},
+                config=config,
+            )
 
-        # Extract the last AI message
-        messages = result.get("messages", [])
-        response = ""
-        for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and msg.content:
-                response = msg.content if isinstance(msg.content, str) else str(msg.content)
-                break
+            # Extract the last AI message
+            messages = result.get("messages", [])
+            response = ""
+            for msg in reversed(messages):
+                if isinstance(msg, AIMessage) and msg.content:
+                    response = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    break
 
-        response = _strip_think(response)
-        return [{"role": "assistant", "content": response}]
-    except Exception as e:
-        # Surface the traceback to stderr. The Gradio UI only receives the
-        # short **Error:** message — the frame location stays in docker logs
-        # where it's useful for debugging.
-        log.exception(
-            "[quinn-chat-lg] unhandled exception for session=%s: %s",
-            session_id, e,
-        )
-        return [{"role": "assistant", "content": f"**Error:** {e}"}]
-    finally:
-        tracing.end_trace()
+            response = _strip_think(response)
+            return [{"role": "assistant", "content": response}]
+        except Exception as e:
+            log.exception(
+                "[quinn-chat-lg] unhandled exception for session=%s: %s",
+                session_id, e,
+            )
+            return [{"role": "assistant", "content": f"**Error:** {e}"}]
+        finally:
+            tracing.flush()
 
 
 def chat_streaming(message: str, history: list[dict], session_id: str):
