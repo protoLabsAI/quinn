@@ -157,6 +157,25 @@ curl http://localhost:7873/a2a \
 
 Quinn has 4 A2A skills: `qa_report`, `board_audit`, `bug_triage`, `pr_review`.
 
+### Streaming + push notifications
+
+Quinn advertises `capabilities.streaming: true` and `pushNotifications: true` and serves the full A2A spec surface (`message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, `tasks/resubscribe`, `tasks/pushNotificationConfig/{set,get,list,delete}`). Every SSE event carries a `kind` discriminator (`task` / `status-update` / `artifact-update`) with camelCase wire fields per the spec — required for `@a2a-js/sdk` to route events.
+
+Push-notification callback URLs are SSRF-validated. Trusted internal docker-network agents can be allowlisted via `PUSH_NOTIFICATION_ALLOWED_HOSTS` / `PUSH_NOTIFICATION_ALLOWED_CIDRS` env vars (default-deny otherwise).
+
+### A2A extensions
+
+Quinn declares and emits these extensions on the agent card:
+
+| Extension | What Quinn provides | How Workstacean consumes it |
+|---|---|---|
+| [`effect-domain-v1`](https://github.com/protoLabsAI/protoWorkstacean/blob/main/docs/extensions/effect-domain-v1.md) | Card declaration: `bug_triage` increments `protomaker_board.data.backlog_count` by +1 (confidence 0.9) | L1 planner ranks Quinn against goals that target world-state selectors |
+| [`worldstate-delta-v1`](https://github.com/protoLabsAI/protoWorkstacean/blob/main/docs/extensions/worldstate-delta-v1.md) | Runtime DataPart on the terminal artifact when `file_bug` succeeds — `{op: "inc", path: "data.backlog_count", value: 1}` | Effect-domain interceptor republishes as `world.state.delta` bus events so the GOAP planner's cached snapshot updates without polling |
+| [`cost-v1`](https://github.com/protoLabsAI/protoWorkstacean/blob/main/docs/extensions/cost-v1.md) | Runtime DataPart on every terminal task that ran an LLM — `{usage: {input_tokens, output_tokens, total_tokens}, durationMs}` (`costUsd` pending — see #27) | Cost interceptor records per-skill samples and publishes `autonomous.cost.quinn.<skill>` events for `agent_fleet_health` |
+| `a2a.trace` propagation | Reads caller's Langfuse trace context from `params.metadata["a2a.trace"]`; stamps `caller_trace_id` + `caller_span_id` into Quinn's own trace metadata | Operators can filter Langfuse by `metadata.caller_trace_id` to find every agent trace spawned from a single Workstacean dispatch |
+
+Pending: `confidence-v1`, `blast-v1`, `hitl-mode-v1` — tracked in [#27](https://github.com/protoLabsAI/quinn/issues/27).
+
 ### Register in LiteLLM Agent Hub (Phase 3)
 
 Once registered at `ai.proto-labs.ai/ui`, other agents can call Quinn via:
