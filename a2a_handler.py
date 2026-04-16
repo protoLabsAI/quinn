@@ -717,7 +717,7 @@ def _check_auth(request: Request, api_key: str) -> None:
 
 def register_a2a_routes(
     app: FastAPI,
-    chat_stream_fn_factory: Callable[[str, str], AsyncGenerator],
+    chat_stream_fn_factory: Callable[..., AsyncGenerator],
     chat_fn: Callable,  # kept for potential future use / testing
     api_key: str,
     agent_card: dict,
@@ -748,10 +748,9 @@ def register_a2a_routes(
         text: str,
         context_id: str,
         push_config: PushNotificationConfig | None,
+        caller_trace: dict | None = None,
     ) -> TaskRecord:
         """Create a TaskRecord, fire the background runner, return immediately."""
-        # Lazy-start the cleanup loop the first time we're inside a running
-        # event loop. Idempotent, cheap.
         _store.start_cleanup()
 
         task_id = str(uuid4())
@@ -767,10 +766,11 @@ def register_a2a_routes(
         )
         await _store.create(record)
 
+        ct = caller_trace or {}
         bg = asyncio.create_task(
             _run_task_background(
                 task_id,
-                lambda: chat_stream_fn_factory(text, context_id),
+                lambda: chat_stream_fn_factory(text, context_id, caller_trace=ct),
             )
         )
         record._bg_task = bg
@@ -784,6 +784,7 @@ def register_a2a_routes(
         context_id: str,
         push_config: PushNotificationConfig | None,
         rpc_id: Any = None,
+        caller_trace: dict | None = None,
     ):
         """Submit a new task and stream its lifecycle as JSON-RPC SSE frames.
 
@@ -797,7 +798,7 @@ def register_a2a_routes(
         frame. Reconnects see the pre-disconnect text via ``:subscribe``'s
         snapshot, then continue from there.
         """
-        record = await _submit_task(text, context_id, push_config)
+        record = await _submit_task(text, context_id, push_config, caller_trace)
         task_id = record.id
 
         # Frame 0: submitted — client gets task_id before the producer starts.
@@ -994,8 +995,15 @@ def register_a2a_routes(
             configuration = params.get("configuration") or {}
             push_config = _parse_push_config(configuration)
 
+            # a2a.trace — distributed Langfuse trace propagation.
+            # The caller (e.g. Workstacean) stamps its current traceId + spanId
+            # into params.metadata["a2a.trace"]. Quinn reads it and forwards to
+            # trace_session so her Langfuse trace cross-references the caller's.
+            msg_metadata = params.get("metadata") or {}
+            caller_trace = msg_metadata.get("a2a.trace") or {}
+
             if method == "message/send":
-                record = await _submit_task(text, context_id, push_config)
+                record = await _submit_task(text, context_id, push_config, caller_trace)
                 return _rpc_result({
                     "id": record.id,
                     "contextId": record.context_id,
@@ -1005,7 +1013,7 @@ def register_a2a_routes(
 
             # streaming path — SSE frames wrapped in JSON-RPC envelopes
             return StreamingResponse(
-                _stream_new_task(text, context_id, push_config, rpc_id=rpc_id),
+                _stream_new_task(text, context_id, push_config, rpc_id=rpc_id, caller_trace=caller_trace),
                 media_type="text/event-stream",
                 headers=_SSE_HEADERS,
             )
