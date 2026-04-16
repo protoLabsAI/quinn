@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from graph.output_format import OutputFilter, extract_output
+from graph.output_format import extract_output
 
 # chat_ui pulls in gradio, which the server needs at runtime but which would
 # otherwise block anyone from importing tiny helpers (e.g. _build_agent_card)
@@ -414,8 +414,14 @@ async def _chat_langgraph_stream(message: str, session_id: str, *, caller_trace:
             if _checkpointer:
                 config["checkpointer"] = _checkpointer
 
-            accumulated_text = ""
-            output_filter = OutputFilter()
+            # Accumulate model tokens silently. We deliberately don't emit
+            # per-chunk `("text", ...)` tuples — chunk-boundary tag splitting
+            # made parsing the `<scratch_pad>`/`<output>` protocol mid-stream
+            # a state-machine rabbit hole, and the A2A consumer already gets
+            # useful progress signal from the tool_start/tool_end events
+            # below. Final text is extracted once, cleanly, on the `done`
+            # frame via `extract_output`.
+            accumulated_raw = ""
 
             async for event in _graph.astream_events(
                 {"messages": [HumanMessage(content=message)], "session_id": session_id},
@@ -443,21 +449,9 @@ async def _chat_langgraph_stream(message: str, session_id: str, *, caller_trace:
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
                         raw = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-                        # Filter yields only content inside <output>...</output>
-                        # (or in passthrough fallback). Scratch_pad never reaches
-                        # the SSE consumer.
-                        emit = output_filter.feed(raw)
-                        if emit:
-                            accumulated_text += emit
-                            yield ("text", emit)
+                        accumulated_raw += raw
 
-            # Release any remaining buffered content (e.g. model closed
-            # <output> in the final token or left it unclosed).
-            tail = output_filter.flush()
-            if tail:
-                accumulated_text += tail
-                yield ("text", tail)
-            yield ("done", accumulated_text)
+            yield ("done", extract_output(accumulated_raw))
 
         except Exception as e:
             # Log with traceback so the frame location reaches docker logs.
