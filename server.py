@@ -14,10 +14,11 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
 from pathlib import Path
 from typing import Any
+
+from graph.output_format import OutputFilter, extract_output
 
 # chat_ui pulls in gradio, which the server needs at runtime but which would
 # otherwise block anyone from importing tiny helpers (e.g. _build_agent_card)
@@ -331,26 +332,6 @@ async def _handle_report_command(session_id: str) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _strip_think(text: str) -> str:
-    """Remove reasoning-content markers from model output.
-
-    Handles three shapes that different models emit:
-    - Balanced ``<think>...</think>`` pairs (Claude, DeepSeek, Qwen3)
-    - Orphaned closing ``</think>`` (when opening is in an earlier chunk)
-    - Orphaned opening ``<think>`` with no closing tag (MiniMax M2.x streams
-      reasoning as ``<think>`` and the closing tag can land in a later frame
-      or get dropped entirely; treat everything from the orphan to EOT as
-      reasoning)
-
-    Keeping this liberal is safe: real user-facing content should never
-    contain literal ``<think>`` tags, so stripping them is idempotent.
-    """
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text)
-    text = re.sub(r"<think>[\s\S]*$", "", text)
-    text = re.sub(r"</think>\s*", "", text)
-    return text.strip()
-
-
 def _worldstate_delta_for_tool(tool_name: str, output: str) -> dict | None:
     """Map a successful tool call to a worldstate-delta-v1 entry, or None.
 
@@ -434,6 +415,7 @@ async def _chat_langgraph_stream(message: str, session_id: str, *, caller_trace:
                 config["checkpointer"] = _checkpointer
 
             accumulated_text = ""
+            output_filter = OutputFilter()
 
             async for event in _graph.astream_events(
                 {"messages": [HumanMessage(content=message)], "session_id": session_id},
@@ -460,13 +442,22 @@ async def _chat_langgraph_stream(message: str, session_id: str, *, caller_trace:
                 elif kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-                        content = _strip_think(content)
-                        if content:
-                            accumulated_text += content
-                            yield ("text", content)
+                        raw = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                        # Filter yields only content inside <output>...</output>
+                        # (or in passthrough fallback). Scratch_pad never reaches
+                        # the SSE consumer.
+                        emit = output_filter.feed(raw)
+                        if emit:
+                            accumulated_text += emit
+                            yield ("text", emit)
 
-            yield ("done", _strip_think(accumulated_text))
+            # Release any remaining buffered content (e.g. model closed
+            # <output> in the final token or left it unclosed).
+            tail = output_filter.flush()
+            if tail:
+                accumulated_text += tail
+                yield ("text", tail)
+            yield ("done", accumulated_text)
 
         except Exception as e:
             # Log with traceback so the frame location reaches docker logs.
@@ -507,7 +498,7 @@ async def _chat_langgraph(message: str, session_id: str) -> list[dict[str, Any]]
                     response = msg.content if isinstance(msg.content, str) else str(msg.content)
                     break
 
-            response = _strip_think(response)
+            response = extract_output(response)
             return [{"role": "assistant", "content": response}]
         except Exception as e:
             log.exception(
