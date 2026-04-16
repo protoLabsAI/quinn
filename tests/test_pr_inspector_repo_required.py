@@ -9,9 +9,6 @@ this test locks the behaviour so the default never sneaks back.
 
 from __future__ import annotations
 
-import asyncio
-import os
-
 import pytest
 
 from tools.pr_inspector import PrInspectorTool
@@ -26,37 +23,41 @@ def test_repo_is_required_in_schema() -> None:
     )
 
 
-def test_execute_errors_loudly_when_repo_missing() -> None:
+@pytest.mark.asyncio
+async def test_execute_errors_loudly_when_repo_missing() -> None:
     tool = PrInspectorTool()
-    result = asyncio.run(tool.execute(action="coderabbit_threads", pr_number=104))
+    result = await tool.execute(action="coderabbit_threads", pr_number=104)
     assert "Error" in result
     assert "repo" in result
 
 
-def test_execute_errors_loudly_when_repo_blank_string() -> None:
+@pytest.mark.asyncio
+async def test_execute_errors_loudly_when_repo_blank_string() -> None:
     tool = PrInspectorTool()
-    result = asyncio.run(
-        tool.execute(action="coderabbit_threads", pr_number=104, repo="")
-    )
+    result = await tool.execute(action="coderabbit_threads", pr_number=104, repo="")
     assert "Error" in result
     assert "repo" in result
 
 
-def test_execute_rejects_malformed_repo() -> None:
+@pytest.mark.asyncio
+async def test_execute_rejects_malformed_repo() -> None:
     tool = PrInspectorTool()
-    result = asyncio.run(
-        tool.execute(action="coderabbit_threads", pr_number=104, repo="not-a-slash")
+    result = await tool.execute(
+        action="coderabbit_threads", pr_number=104, repo="not-a-slash"
     )
     assert "owner/name" in result
 
 
-def test_error_message_mentions_env_var_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_error_message_mentions_env_var_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When GITHUB_REPO is set, the error message should mention it to help
     operators understand why the call failed — and explicitly reject falling
     back to it, since the whole point of the fix is no silent defaults."""
     monkeypatch.setenv("GITHUB_REPO", "protoLabsAI/some-repo")
     tool = PrInspectorTool()
-    result = asyncio.run(tool.execute(action="coderabbit_threads", pr_number=104))
+    result = await tool.execute(action="coderabbit_threads", pr_number=104)
     assert "Error" in result
     assert "protoLabsAI/some-repo" in result
     # Must not have silently used the env var
