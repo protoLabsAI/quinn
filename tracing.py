@@ -46,6 +46,12 @@ _trace_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
     "_quinn_trace_id", default="",
 )
 
+# Holds the A2A/Gradio session_id so middleware (AuditMiddleware) and
+# audit logging can stamp it without needing access to graph state.
+_session_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_quinn_session_id", default="",
+)
+
 
 def init() -> None:
     """Connect to Langfuse if LANGFUSE_{PUBLIC,SECRET}_KEY are set. Idempotent."""
@@ -85,6 +91,11 @@ def current_trace_id() -> str:
     return _trace_id_ctx.get()
 
 
+def current_session_id() -> str:
+    """Return the session_id of the currently-active session (or empty)."""
+    return _session_id_ctx.get()
+
+
 @contextlib.asynccontextmanager
 async def trace_session(
     session_id: str,
@@ -112,8 +123,15 @@ async def trace_session(
     contextvar so audit records created inside the scope can be cross-
     referenced to the trace.
     """
+    # Always set session_id so AuditMiddleware can read it even when
+    # Langfuse is disabled.
+    sid_token = _session_id_ctx.set(session_id)
+
     if not _enabled or _langfuse is None:
-        yield None
+        try:
+            yield None
+        finally:
+            _session_id_ctx.reset(sid_token)
         return
 
     ctx = None
@@ -132,10 +150,13 @@ async def trace_session(
         token = _trace_id_ctx.set(trace_id)
         yield span
     except Exception as e:
-        # Tracing must never break the agent. Log + continue unscoped.
         print(f"[tracing] trace_session({name}) error: {e}")
         yield None
     finally:
+        try:
+            _session_id_ctx.reset(sid_token)
+        except Exception:
+            pass
         if token is not None:
             try:
                 _trace_id_ctx.reset(token)

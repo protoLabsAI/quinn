@@ -72,9 +72,12 @@ async def test_disabled_trace_session_is_noop_context_manager():
     async with tracing.trace_session("s-1", name="x") as span:
         assert span is None
         assert tracing.current_trace_id() == ""
+        # session_id is set even when Langfuse is disabled
+        assert tracing.current_session_id() == "s-1"
 
     # Calls outside a session return default ""
     assert tracing.current_trace_id() == ""
+    assert tracing.current_session_id() == ""
 
 
 def test_disabled_trace_tool_call_returns_none():
@@ -99,9 +102,11 @@ async def test_trace_session_enters_context_and_exposes_trace_id():
     fake, span, _child = _enable_with_fake_client(tracing)
 
     captured_trace_id = None
+    captured_session_id = None
 
     async with tracing.trace_session("s-abc", name="quinn-a2a-stream"):
         captured_trace_id = tracing.current_trace_id()
+        captured_session_id = tracing.current_session_id()
 
     # start_as_current_observation was called with the right name + metadata
     fake.start_as_current_observation.assert_called_once()
@@ -118,6 +123,9 @@ async def test_trace_session_enters_context_and_exposes_trace_id():
     # current_trace_id reflected the span inside the scope, clears outside
     assert captured_trace_id == "trace-abc"
     assert tracing.current_trace_id() == ""
+    # session_id is set by trace_session and cleared on exit
+    assert captured_session_id == "s-abc"
+    assert tracing.current_session_id() == ""
 
 
 @pytest.mark.asyncio

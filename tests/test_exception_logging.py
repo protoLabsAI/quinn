@@ -58,6 +58,7 @@ def _stub_tracing():
     tracing.flush = lambda: None
     tracing.is_enabled = lambda: False
     tracing.current_trace_id = lambda: ""
+    tracing.current_session_id = lambda: ""
     sys.modules["tracing"] = tracing
 
 

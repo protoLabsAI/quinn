@@ -33,7 +33,7 @@ class AuditMiddleware(AgentMiddleware):
 
         tool_name = request.tool_call.get("name", "unknown")
         args = request.tool_call.get("args", {})
-        session_id = ""
+        session_id = tracing.current_session_id()
 
         t0 = time.monotonic()
         try:
@@ -77,7 +77,7 @@ class AuditMiddleware(AgentMiddleware):
 
         tool_name = request.tool_call.get("name", "unknown")
         args = request.tool_call.get("args", {})
-        session_id = ""
+        session_id = tracing.current_session_id()
 
         t0 = time.monotonic()
         try:
