@@ -583,10 +583,14 @@ async def test_webhook_delivery_success():
         call_kwargs = mock_client.post.call_args
         assert call_kwargs.kwargs["headers"]["Authorization"] == "Bearer tok123"
         payload = call_kwargs.kwargs["json"]
-        assert payload["task_id"] == "test-task-id"
+        assert payload["kind"] == "status-update"
+        assert payload["taskId"] == "test-task-id"
         assert payload["status"]["state"] == COMPLETED
-        # Completed tasks include the artifact
+        assert payload["final"] is True
+        # Completed tasks include the artifact with camelCase lastChunk
         assert "artifact" in payload
+        assert payload["artifact"]["lastChunk"] is True
+        assert payload["artifact"]["artifactId"] == "test-task-id"
 
 
 @pytest.mark.asyncio
@@ -612,20 +616,48 @@ async def test_webhook_delivery_no_token():
 # ── Event builders ────────────────────────────────────────────────────────────
 
 
-def test_build_status_event():
+def test_build_status_event_has_a2a_spec_shape():
+    """A2A spec: TaskStatusUpdateEvent has kind='status-update',
+    camelCase taskId/contextId, and a final flag. Without these fields
+    @a2a-js/sdk silently skips every event (quinn#40 regression)."""
     record = _make_record(state=WORKING)
     evt = _build_status_event(record)
-    assert evt["task_id"] == "test-task-id"
-    assert evt["context_id"] == "test-ctx"
+    assert evt["kind"] == "status-update"
+    assert evt["taskId"] == "test-task-id"
+    assert evt["contextId"] == "test-ctx"
     assert evt["status"]["state"] == WORKING
+    assert evt["final"] is False
 
 
-def test_build_artifact_event():
+def test_build_status_event_final_flag():
+    record = _make_record(state=COMPLETED)
+    evt = _build_status_event(record, final=True)
+    assert evt["final"] is True
+
+
+def test_build_artifact_event_has_a2a_spec_shape():
+    """A2A spec: TaskArtifactUpdateEvent has kind='artifact-update',
+    camelCase taskId/contextId/lastChunk, and the artifact object
+    carries an artifactId for cross-event correlation."""
     record = _make_record(accumulated_text="some output")
     evt = _build_artifact_event(record, last_chunk=True)
+    assert evt["kind"] == "artifact-update"
+    assert evt["taskId"] == "test-task-id"
+    assert evt["contextId"] == "test-ctx"
+    assert evt["artifact"]["artifactId"] == "test-task-id"
     assert evt["artifact"]["parts"][0]["text"] == "some output"
-    assert evt["last_chunk"] is True
+    assert evt["lastChunk"] is True
     assert evt["append"] is True
+
+
+def test_task_to_response_has_kind_discriminator():
+    """A2A spec: Task objects carry kind='task'. This is what
+    message/send / tasks/get / initial stream frame all return."""
+    record = _make_record(state=WORKING)
+    resp = _task_to_response(record)
+    assert resp["kind"] == "task"
+    assert resp["id"] == "test-task-id"
+    assert resp["contextId"] == "test-ctx"
 
 
 # ── _watch_task: shared SSE consumer ─────────────────────────────────────────
@@ -855,6 +887,67 @@ async def test_message_send_returns_submitted():
     data = resp.json()
     assert data["result"]["status"]["state"] == SUBMITTED
     assert "id" in data["result"]
+
+
+@pytest.mark.asyncio
+async def test_message_stream_events_have_kind_discriminator():
+    """Live SSE frames for `message/stream` must each carry a `kind`
+    discriminator (task / status-update / artifact-update) per the A2A
+    spec. Without `kind`, @a2a-js/sdk's ``for await`` loop silently
+    skips every event and Workstacean's TaskTracker never attaches —
+    quinn#40. Lock the frame shape so this regression can't recur.
+    """
+    app, _ = _make_test_app()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test", timeout=5.0,
+    ) as client:
+        async with client.stream(
+            "POST", "/a2a",
+            json={
+                "jsonrpc": "2.0",
+                "id": "s1",
+                "method": "message/stream",
+                "params": {"message": {"parts": [{"kind": "text", "text": "hi"}]}},
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            frames = []
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                import json as _json
+                payload = _json.loads(line[6:])
+                result = payload.get("result", {})
+                frames.append(result)
+                # Stop once we have the initial task + at least one update —
+                # the fake stream in _make_test_app completes fast.
+                if len(frames) >= 3:
+                    break
+
+    # Every frame must declare its kind — the spec uses this for SDK routing
+    for f in frames:
+        assert "kind" in f, f"frame missing `kind`: {f}"
+        assert f["kind"] in ("task", "status-update", "artifact-update", "message"), (
+            f"unknown kind: {f['kind']}"
+        )
+
+    # Frame 0 must be the full Task snapshot
+    assert frames[0]["kind"] == "task"
+    assert frames[0]["id"]
+    assert frames[0]["contextId"]
+
+    # Subsequent frames must use camelCase taskId / contextId (not snake_case)
+    for f in frames[1:]:
+        assert "taskId" in f, f"update event missing camelCase `taskId`: {f}"
+        assert "contextId" in f, f"update event missing camelCase `contextId`: {f}"
+        # No snake_case leakage
+        assert "task_id" not in f
+        assert "context_id" not in f
+        assert "last_chunk" not in f
+        if f["kind"] == "artifact-update":
+            assert "lastChunk" in f  # camelCase per spec
+            assert "artifactId" in f["artifact"]
 
 
 @pytest.mark.asyncio
