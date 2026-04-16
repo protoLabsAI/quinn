@@ -380,7 +380,7 @@ async def chat(message: str, session_id: str) -> list[dict[str, Any]]:
     return _msg("**Error:** No agent backend initialized.")
 
 
-async def _chat_langgraph_stream(message: str, session_id: str):
+async def _chat_langgraph_stream(message: str, session_id: str, *, caller_trace: dict | None = None):
     """Async generator that yields (event_type, payload) tuples via astream_events.
 
     Consumed by a2a_handler.register_a2a_routes to drive SSE streaming and
@@ -391,18 +391,26 @@ async def _chat_langgraph_stream(message: str, session_id: str):
         - "text"                      — incremental model output chunks
         - "done"                      — terminal state, payload is final text
         - "error"                     — terminal state, payload is error msg
+
+    ``caller_trace`` is the ``a2a.trace`` metadata from the incoming A2A
+    message. When present, the Langfuse trace stamps ``caller_trace_id``
+    and ``caller_span_id`` so the operator can cross-reference Quinn's
+    trace to the dispatching agent's trace in the same Langfuse project.
     """
     import tracing
     from langchain_core.messages import HumanMessage
 
-    # trace_session opens a parent Langfuse observation and makes it the
-    # current span for the duration of this call. Tool + LLM observations
-    # created inside (AuditMiddleware.trace_tool_call + the LiteLLM gateway
-    # callback) nest under it automatically.
+    trace_meta: dict = {"message_preview": message[:100]}
+    if caller_trace:
+        if caller_trace.get("traceId"):
+            trace_meta["caller_trace_id"] = caller_trace["traceId"]
+        if caller_trace.get("spanId"):
+            trace_meta["caller_span_id"] = caller_trace["spanId"]
+
     async with tracing.trace_session(
         session_id=session_id,
         name="quinn-a2a-stream",
-        metadata={"message_preview": message[:100]},
+        metadata=trace_meta,
     ):
         try:
             # thread_id prefix isolates A2A sessions from Gradio chat in the

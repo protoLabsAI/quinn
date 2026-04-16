@@ -810,7 +810,7 @@ def _make_test_app():
     app = FastAPI()
     card = {"name": "test", "capabilities": {}}
 
-    async def _fake_stream(text, context_id):
+    async def _fake_stream(text, context_id, **kwargs):
         yield ("text", "hello ")
         yield ("text", "world")
         yield ("done", "hello world")
