@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Callable
@@ -421,6 +422,42 @@ def _extract_text_and_context(message: dict, context_id: str = "") -> tuple[str,
     return text, context_id
 
 
+def _parse_allowlist() -> tuple[frozenset[str], tuple]:
+    """Parse the webhook allowlist env vars once per import.
+
+    ``PUSH_NOTIFICATION_ALLOWED_HOSTS`` is a comma-separated list of
+    hostnames (e.g. ``workstacean,automaker-server``) that bypass the
+    SSRF check entirely — trusted internal agents on the docker
+    network where every hostname resolves to an RFC1918 address by
+    design.
+
+    ``PUSH_NOTIFICATION_ALLOWED_CIDRS`` is a comma-separated list of
+    CIDR ranges (e.g. ``10.0.14.0/24``) that bypass the SSRF check
+    when the resolved IP falls inside any of them.
+
+    Both are empty by default — the guard stays default-deny for any
+    caller the operator hasn't explicitly trusted.
+    """
+    import ipaddress
+
+    hosts_raw = os.environ.get("PUSH_NOTIFICATION_ALLOWED_HOSTS", "")
+    cidrs_raw = os.environ.get("PUSH_NOTIFICATION_ALLOWED_CIDRS", "")
+    hosts = frozenset(h.strip() for h in hosts_raw.split(",") if h.strip())
+    cidrs = []
+    for c in cidrs_raw.split(","):
+        c = c.strip()
+        if not c:
+            continue
+        try:
+            cidrs.append(ipaddress.ip_network(c, strict=False))
+        except ValueError:
+            logger.warning("[a2a] ignoring malformed CIDR in allowlist: %s", c)
+    return hosts, tuple(cidrs)
+
+
+_ALLOWED_HOSTS, _ALLOWED_CIDRS = _parse_allowlist()
+
+
 def _is_safe_webhook_url(url: str) -> bool:
     """Reject unsafe webhook targets before we accept a push config.
 
@@ -430,9 +467,15 @@ def _is_safe_webhook_url(url: str) -> bool:
     device. One-time resolution is not a full defence against DNS rebinding,
     but it closes the trivial "just give it a RFC1918 literal" vector.
 
-    Accepts:  http/https URLs to globally-routable IPs.
-    Rejects:  non-http(s) schemes, loopback, link-local, private (RFC1918),
-              multicast, reserved, and unresolvable hostnames.
+    Accepts:
+    - http/https URLs to globally-routable IPs.
+    - Hostnames in ``PUSH_NOTIFICATION_ALLOWED_HOSTS`` (trusted docker-network
+      agents that resolve to RFC1918 by design).
+    - Resolved IPs falling inside ``PUSH_NOTIFICATION_ALLOWED_CIDRS``.
+
+    Rejects: non-http(s) schemes, unresolvable hostnames, and anything that
+    resolves to loopback / link-local / private / multicast / reserved
+    addresses that isn't explicitly allowlisted.
     """
     import ipaddress
     import socket
@@ -447,6 +490,11 @@ def _is_safe_webhook_url(url: str) -> bool:
     host = parsed.hostname
     if not host:
         return False
+
+    # Hostname allowlist takes precedence — trusted docker-network agents
+    # where the DNS name resolves to an RFC1918 address by design.
+    if host in _ALLOWED_HOSTS:
+        return True
 
     # If the hostname is already a literal IP, check it directly; otherwise
     # resolve once and check every returned address (multi-A / AAAA).
@@ -467,6 +515,8 @@ def _is_safe_webhook_url(url: str) -> bool:
             ip = ipaddress.ip_address(addr)
         except ValueError:
             return False
+        if _ALLOWED_CIDRS and any(ip in cidr for cidr in _ALLOWED_CIDRS):
+            continue  # CIDR allowlist bypass — trust this address
         if (
             ip.is_loopback
             or ip.is_link_local
