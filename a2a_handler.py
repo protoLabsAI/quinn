@@ -302,14 +302,26 @@ def _terminal_artifact_parts(record: TaskRecord) -> list[dict]:
 
 
 def _task_to_response(record: TaskRecord) -> dict:
+    """Full Task snapshot (the spec's ``Task`` type).
+
+    Returned as the result for ``message/send``, ``tasks/get``, and
+    ``tasks/resubscribe``'s initial frame, plus the first frame of
+    every ``message/stream``. The ``kind: "task"`` discriminator is
+    what lets ``@a2a-js/sdk`` routes the event into its Task handler
+    instead of silently discarding it.
+    """
     resp: dict[str, Any] = {
+        "kind": "task",
         "id": record.id,
         "contextId": record.context_id,
         "status": {"state": record.state, "timestamp": record.updated_at},
     }
     parts = _terminal_artifact_parts(record)
     if parts:
-        resp["artifacts"] = [{"parts": parts}]
+        resp["artifacts"] = [{
+            "artifactId": record.id,
+            "parts": parts,
+        }]
     if record.error_message:
         resp["status"]["message"] = {
             "role": "agent",
@@ -318,11 +330,21 @@ def _task_to_response(record: TaskRecord) -> dict:
     return resp
 
 
-def _build_status_event(record: TaskRecord) -> dict:
+def _build_status_event(record: TaskRecord, *, final: bool = False) -> dict:
+    """A2A ``TaskStatusUpdateEvent`` — progressive state transitions.
+
+    Requires the ``kind: "status-update"`` discriminator plus camelCase
+    field names (``taskId``, ``contextId``) per the A2A spec; without
+    them ``@a2a-js/sdk`` silently skips the event and Workstacean's
+    TaskTracker never sees the task. ``final=true`` signals the last
+    transition in this stream (used on COMPLETED / FAILED / CANCELED).
+    """
     evt: dict[str, Any] = {
-        "task_id": record.id,
-        "context_id": record.context_id,
+        "kind": "status-update",
+        "taskId": record.id,
+        "contextId": record.context_id,
         "status": {"state": record.state, "timestamp": record.updated_at},
+        "final": final,
     }
     if record.error_message:
         evt["status"]["message"] = {
@@ -346,46 +368,46 @@ def _build_artifact_event(
     append: bool = True,
     last_chunk: bool,
 ) -> dict:
-    """Build an artifact update event frame.
+    """A2A ``TaskArtifactUpdateEvent`` — streamed artifact chunks.
 
-    Defaults match the historical behaviour (full record.accumulated_text,
-    append=True) so existing callers remain correct. Consumers that want to
-    emit an incremental delta should pass ``text=<delta>`` and
-    ``append=True``; callers that are replacing the full artifact (e.g.
-    initial snapshot on :subscribe reconnect, terminal frame) should pass
-    ``text=<full>`` and ``append=False``.
-
-    On terminal frames with accumulated worldstate deltas, the full terminal
-    artifact (text + DataPart) is emitted via ``_terminal_artifact_parts``
-    instead — see ``_build_terminal_artifact_event``.
+    Requires ``kind: "artifact-update"`` + camelCase ``lastChunk`` per
+    the A2A spec; the artifact itself carries an ``artifactId`` so
+    clients can correlate streamed chunks across events. Use
+    ``text=<delta>`` + ``append=True`` for mid-run deltas, or
+    ``text=<full>`` + ``append=False`` to replace the artifact (initial
+    snapshot on :subscribe, terminal frame).
     """
     body_text = text if text is not None else record.accumulated_text
     return {
-        "task_id": record.id,
-        "context_id": record.context_id,
-        "artifact": {"parts": [{"kind": "text", "text": body_text}]},
+        "kind": "artifact-update",
+        "taskId": record.id,
+        "contextId": record.context_id,
+        "artifact": {
+            "artifactId": record.id,
+            "parts": [{"kind": "text", "text": body_text}],
+        },
         "append": append,
-        "last_chunk": last_chunk,
+        "lastChunk": last_chunk,
     }
 
 
 def _build_terminal_artifact_event(record: TaskRecord) -> dict:
     """Terminal artifact: full text + worldstate-delta DataPart if any.
 
-    Used on COMPLETED frames for both the streaming and subscribe paths so
+    Used on COMPLETED for both the streaming and :subscribe paths so
     consumers see the authoritative final artifact (``append: false``,
-    ``last_chunk: true``) with every accumulated delta attached.
+    ``lastChunk: true``) with every accumulated delta attached.
     """
     return {
-        "task_id": record.id,
-        "context_id": record.context_id,
+        "kind": "artifact-update",
+        "taskId": record.id,
+        "contextId": record.context_id,
         "artifact": {
+            "artifactId": record.id,
             "parts": _terminal_artifact_parts(record),
-            "append": False,
-            "last_chunk": True,
         },
         "append": False,
-        "last_chunk": True,
+        "lastChunk": True,
     }
 
 
@@ -482,14 +504,15 @@ async def _deliver_webhook(record: TaskRecord, push_config: PushNotificationConf
     Retries 3× with exponential backoff (1s / 3s / 9s).
     Skips retry on 4xx (client error — retrying won't help).
     """
-    payload = _build_status_event(record)
+    payload = _build_status_event(record, final=record.state in _TERMINAL)
     if record.state == COMPLETED:
         parts = _terminal_artifact_parts(record)
         if parts:
             payload["artifact"] = {
+                "artifactId": record.id,
                 "parts": parts,
                 "append": False,
-                "last_chunk": True,
+                "lastChunk": True,
             }
 
     headers = {"Content-Type": "application/json"}
@@ -801,18 +824,11 @@ def register_a2a_routes(
         record = await _submit_task(text, context_id, push_config, caller_trace)
         task_id = record.id
 
-        # Frame 0: submitted — client gets task_id before the producer starts.
-        # Watcher will emit the next status frame (WORKING) once the bg task
-        # transitions, so there's no duplication with the watcher's first
-        # snapshot.
-        yield _sse_rpc(
-            rpc_id,
-            {
-                "id": task_id,
-                "contextId": context_id,
-                "status": {"state": SUBMITTED, "timestamp": record.created_at},
-            },
-        )
+        # Frame 0: initial Task snapshot — `kind: "task"`, full Task
+        # object per the A2A spec. @a2a-js/sdk routes this into its
+        # Task handler; without `kind` it would silently skip the event
+        # and Workstacean's TaskTracker would never see the task.
+        yield _sse_rpc(rpc_id, _task_to_response(record))
 
         try:
             async for kind, r, payload in _watch_task(task_id, start_text_len=0):
@@ -823,51 +839,30 @@ def register_a2a_routes(
                     return
 
                 if kind == "status":
-                    base = {"state": r.state, "timestamp": r.updated_at}
-                    if r.error_message:
-                        base["message"] = {
-                            "role": "agent",
-                            "parts": [{"kind": "text", "text": r.error_message}],
-                        }
-                    elif r.last_status_message and r.state not in _TERMINAL:
-                        base["message"] = {
-                            "role": "agent",
-                            "parts": [{"kind": "text", "text": r.last_status_message}],
-                        }
-                    frame: dict[str, Any] = {
-                        "id": task_id,
-                        "contextId": context_id,
-                        "status": base,
-                    }
+                    # COMPLETED gets TWO events per A2A spec: the terminal
+                    # artifact-update (full text + worldstate DataPart,
+                    # append=false, lastChunk=true), then a final
+                    # status-update (final=true) to close the stream.
                     if r.state == COMPLETED:
-                        # Terminal frame carries the full artifact (text +
-                        # worldstate-delta DataPart) as append=false so
-                        # clients replace whatever incremental text they
-                        # already assembled.
-                        frame["artifacts"] = [{
-                            "parts": _terminal_artifact_parts(r),
-                            "append": False,
-                            "last_chunk": True,
-                        }]
-                    yield _sse_rpc(rpc_id, frame)
+                        yield _sse_rpc(rpc_id, _build_terminal_artifact_event(r))
+                        yield _sse_rpc(rpc_id, _build_status_event(r, final=True))
+                    else:
+                        yield _sse_rpc(
+                            rpc_id,
+                            _build_status_event(r, final=r.state in _TERMINAL),
+                        )
 
                 elif kind == "text_delta":
                     # Mid-run delta: just the new suffix, append=true. Only
                     # emitted when the task is still WORKING — terminal
-                    # deltas roll into the status frame's artifacts list.
+                    # deltas roll into the artifact-update on the next
+                    # status event.
                     if r.state not in _TERMINAL and payload:
                         yield _sse_rpc(
                             rpc_id,
-                            {
-                                "id": task_id,
-                                "contextId": context_id,
-                                "status": {"state": WORKING},
-                                "artifacts": [{
-                                    "parts": [{"kind": "text", "text": payload}],
-                                    "append": True,
-                                    "last_chunk": False,
-                                }],
-                            },
+                            _build_artifact_event(
+                                r, text=payload, append=True, last_chunk=False,
+                            ),
                         )
         except asyncio.CancelledError:
             # The HTTP connection closed (client disconnect). DO NOT cancel
@@ -890,20 +885,10 @@ def register_a2a_routes(
             return
         snapshot_len = len(snapshot.accumulated_text)
 
-        # Initial snapshot — status + full artifact replacement if text exists.
-        base_status: dict[str, Any] = {
-            "id": task_id, "contextId": snapshot.context_id,
-            "status": {"state": snapshot.state, "timestamp": snapshot.updated_at},
-        }
-        if snapshot.accumulated_text:
-            base_status["artifacts"] = [{
-                "parts": _terminal_artifact_parts(snapshot)
-                         if snapshot.state == COMPLETED
-                         else [{"kind": "text", "text": snapshot.accumulated_text}],
-                "append": False,
-                "last_chunk": snapshot.state in _TERMINAL,
-            }]
-        yield _sse_rpc(rpc_id, base_status)
+        # Initial snapshot — emit the full Task object (kind: "task") so
+        # the client can reconstruct the whole state, then stream only
+        # the deltas after that.
+        yield _sse_rpc(rpc_id, _task_to_response(snapshot))
 
         try:
             async for kind, r, payload in _watch_task(
@@ -915,38 +900,22 @@ def register_a2a_routes(
                 if r is None:
                     return
                 if kind == "status":
-                    frame: dict[str, Any] = {
-                        "id": task_id, "contextId": r.context_id,
-                        "status": {"state": r.state, "timestamp": r.updated_at},
-                    }
-                    if r.error_message:
-                        frame["status"]["message"] = {
-                            "role": "agent",
-                            "parts": [{"kind": "text", "text": r.error_message}],
-                        }
-                    elif r.last_status_message and r.state not in _TERMINAL:
-                        frame["status"]["message"] = {
-                            "role": "agent",
-                            "parts": [{"kind": "text", "text": r.last_status_message}],
-                        }
                     if r.state == COMPLETED:
-                        frame["artifacts"] = [{
-                            "parts": _terminal_artifact_parts(r),
-                            "append": False,
-                            "last_chunk": True,
-                        }]
-                    yield _sse_rpc(rpc_id, frame)
+                        yield _sse_rpc(rpc_id, _build_terminal_artifact_event(r))
+                        yield _sse_rpc(rpc_id, _build_status_event(r, final=True))
+                    else:
+                        yield _sse_rpc(
+                            rpc_id,
+                            _build_status_event(r, final=r.state in _TERMINAL),
+                        )
                 elif kind == "text_delta":
                     if r.state not in _TERMINAL and payload:
-                        yield _sse_rpc(rpc_id, {
-                            "id": task_id, "contextId": r.context_id,
-                            "status": {"state": WORKING},
-                            "artifacts": [{
-                                "parts": [{"kind": "text", "text": payload}],
-                                "append": True,
-                                "last_chunk": False,
-                            }],
-                        })
+                        yield _sse_rpc(
+                            rpc_id,
+                            _build_artifact_event(
+                                r, text=payload, append=True, last_chunk=False,
+                            ),
+                        )
         except asyncio.CancelledError:
             logger.info(
                 "[a2a] resubscribe consumer for %s disconnected; bg task continues",
@@ -1298,6 +1267,6 @@ def register_a2a_routes(
             await _push(record)
 
         logger.info("[a2a] push config registered for task %s → %s", task_id, cfg.url)
-        return {"id": cfg.id, "task_id": task_id, "url": cfg.url}
+        return {"id": cfg.id, "taskId": task_id, "url": cfg.url}
 
     logger.info("[a2a] routes registered (streaming=True, pushNotifications=True)")
