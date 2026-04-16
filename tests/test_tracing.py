@@ -197,3 +197,42 @@ def test_no_legacy_shims_exist():
     assert not hasattr(tracing, "start_trace")
     assert not hasattr(tracing, "end_trace")
     assert not hasattr(tracing, "trace_llm_call")
+
+
+def test_otel_cross_context_detach_error_is_silenced():
+    """Quinn #43: when an SSE consumer (Workstacean's A2AExecutor)
+    closes the stream early, GeneratorExit propagates through
+    trace_session's __aexit__. The Langfuse span's underlying OTel
+    token was attached in a child task's contextvar snapshot, so the
+    detach during cleanup logs an error before raising. Our finally
+    block already swallows the raised ValueError — this test locks in
+    that the OTel logger doesn't spam docker logs about it either.
+    """
+    import io
+    import logging
+    _reload_tracing()  # ensures the filter is installed via module import
+
+    handler_buf = io.StringIO()
+    handler = logging.StreamHandler(handler_buf)
+    handler.setLevel(logging.ERROR)
+    otel_log = logging.getLogger("opentelemetry.context")
+    otel_log.addHandler(handler)
+    otel_log.setLevel(logging.ERROR)
+
+    try:
+        # Simulate the exact noise OTel emits on cross-context detach.
+        otel_log.error(
+            "Failed to detach context: <Token var=<ContextVar name='current_context' "
+            "default={} at 0x...> at 0x...> was created in a different Context"
+        )
+        otel_log.error("Some other unrelated OTel error that should NOT be silenced")
+    finally:
+        otel_log.removeHandler(handler)
+
+    output = handler_buf.getvalue()
+    assert "different Context" not in output, (
+        "filter failed to silence the cross-context detach error"
+    )
+    assert "unrelated OTel error" in output, (
+        "filter is too broad — it silenced an unrelated error too"
+    )

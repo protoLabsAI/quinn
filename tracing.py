@@ -33,11 +33,29 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import logging
 import os
 from typing import Any, AsyncIterator
 
 _langfuse = None
 _enabled = False
+
+
+# Silence the harmless "Failed to detach context" error emitted by
+# OpenTelemetry when Langfuse's span context manager exits in a
+# different async context than where it was attached. This happens
+# every time an SSE consumer closes the stream early — Workstacean's
+# A2AExecutor breaks out of the `for await` loop after capturing the
+# initial task event by design, which raises GeneratorExit through
+# our `async with trace_session(...)`. The span's underlying OTel
+# token was created in a child task's contextvar snapshot, so the
+# detach during cleanup logs an error before raising. We already
+# swallow the raised ValueError in trace_session's finally block;
+# this filter just stops OTel from spamming docker logs about it.
+# Quinn #43.
+logging.getLogger("opentelemetry.context").addFilter(
+    lambda record: "was created in a different Context" not in record.getMessage()
+)
 
 # Holds the current Langfuse trace_id for the active async context. Audit
 # logging + error handlers read this to cross-reference records back to
