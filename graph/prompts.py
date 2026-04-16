@@ -9,6 +9,7 @@ Composes the system prompt from:
 
 from pathlib import Path
 
+from graph.output_format import OUTPUT_FORMAT_INSTRUCTIONS
 from graph.subagents.config import SUBAGENT_REGISTRY
 
 
@@ -66,6 +67,9 @@ def build_system_prompt(
 - Reply directly with text for conversations. Use the task tool to delegate parallel work.
 """)
 
+    # 6. Response format (scratch_pad + output tags — parsed server-side)
+    parts.append(OUTPUT_FORMAT_INSTRUCTIONS)
+
     return "\n\n".join(parts)
 
 
@@ -98,8 +102,17 @@ def _build_subagent_section() -> str:
 
 
 def build_subagent_prompt(agent_name: str, workspace: str = "/sandbox") -> str:
-    """Build system prompt for a specific subagent."""
+    """Build system prompt for a specific subagent.
+
+    Subagents' return values are parsed by the lead agent, so they use
+    the same `<scratch_pad>`/`<output>` protocol — keeps the pipeline
+    uniform and lets OutputFilter handle subagent output the same way it
+    handles top-level streaming.
+    """
     config = SUBAGENT_REGISTRY.get(agent_name)
-    if not config:
-        return "You are a QA subagent. Complete the delegated task efficiently."
-    return config.system_prompt
+    base = (
+        config.system_prompt
+        if config
+        else "You are a QA subagent. Complete the delegated task efficiently."
+    )
+    return f"{base}\n\n{OUTPUT_FORMAT_INSTRUCTIONS}"
