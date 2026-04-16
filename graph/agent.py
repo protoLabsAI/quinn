@@ -44,16 +44,15 @@ def _build_middleware(config: LangGraphConfig, knowledge_store=None):
 def _build_task_tool(config: LangGraphConfig, all_tools: list[BaseTool]):
     """Build the task tool for subagent delegation.
 
-    This is a simplified version of DeerFlow's task tool -- it runs
-    subagents synchronously (blocking) since our Gradio UI doesn't
-    support async streaming of subagent progress yet.
+    Subagents get AuditMiddleware so their tool calls land in
+    audit.jsonl + Langfuse alongside the parent agent's calls. The
+    session_id contextvar set by trace_session propagates automatically
+    because subagents run inside the same async context as the parent.
     """
     from langchain_core.tools import tool
-    from langgraph.prebuilt import create_react_agent
 
     llm = create_llm(config)
 
-    # Build tool registries for each subagent
     tool_map = {t.name: t for t in all_tools}
 
     @tool
@@ -79,7 +78,6 @@ def _build_task_tool(config: LangGraphConfig, all_tools: list[BaseTool]):
             available = ", ".join(SUBAGENT_REGISTRY.keys())
             return f"Error: Unknown subagent '{subagent_type}'. Available: {available}"
 
-        # Filter tools for this subagent
         sub_tools = [
             tool_map[name] for name in sub_config.tools
             if name in tool_map
@@ -88,21 +86,19 @@ def _build_task_tool(config: LangGraphConfig, all_tools: list[BaseTool]):
         if not sub_tools:
             return f"Error: No tools available for subagent '{subagent_type}'."
 
-        # Create subagent graph
-        subagent = create_react_agent(
+        subagent = create_agent(
             model=llm,
             tools=sub_tools,
-            prompt=build_subagent_prompt(subagent_type),
+            middleware=[AuditMiddleware()],
+            system_prompt=build_subagent_prompt(subagent_type),
         )
 
-        # Run subagent
         try:
             result = await subagent.ainvoke(
                 {"messages": [{"role": "user", "content": prompt}]},
                 config={"recursion_limit": sub_config.max_turns},
             )
 
-            # Extract the last AI message as the result
             messages = result.get("messages", [])
             for msg in reversed(messages):
                 if hasattr(msg, "content") and msg.content:
