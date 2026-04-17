@@ -1033,8 +1033,13 @@ async def test_message_send_returns_submitted():
 
     assert resp.status_code == 200
     data = resp.json()
+    # Spec-compliance: the result must be a full Task object with the
+    # `kind` discriminator — @a2a-js/sdk routes by kind. Inline-dict
+    # builds have omitted it in the past (quinn#61 investigation).
+    assert data["result"]["kind"] == "task"
     assert data["result"]["status"]["state"] == SUBMITTED
     assert "id" in data["result"]
+    assert "contextId" in data["result"]
 
 
 @pytest.mark.asyncio

@@ -1121,12 +1121,13 @@ def register_a2a_routes(
 
             if method == "message/send":
                 record = await _submit_task(text, context_id, push_config, caller_trace)
-                return _rpc_result({
-                    "id": record.id,
-                    "contextId": record.context_id,
-                    "status": {"state": SUBMITTED,
-                               "timestamp": record.created_at},
-                })
+                # Use _task_to_response so the `kind: "task"` discriminator
+                # and every other Task field land consistently with the
+                # SSE / REST / tasks/get paths. Building the dict inline
+                # omitted `kind`, which `@a2a-js/sdk` uses to route the
+                # result into its Task handler (spec-compliance with the
+                # a2a-streaming guide).
+                return _rpc_result(_task_to_response(record))
 
             # streaming path — SSE frames wrapped in JSON-RPC envelopes
             return StreamingResponse(
