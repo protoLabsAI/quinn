@@ -617,12 +617,45 @@ def _parse_push_config(configuration: dict) -> PushNotificationConfig | None:
     if not _is_safe_webhook_url(url):
         logger.warning("[a2a] rejected unsafe webhook url: %s", url)
         return None
-    auth = cfg.get("authentication") or {}
     return PushNotificationConfig(
         url=url,
-        token=auth.get("credentials"),
+        token=_extract_push_token(cfg),
         id=cfg.get("id", str(uuid4())),
     )
+
+
+def _extract_push_token(cfg: dict) -> str | None:
+    """Pull the bearer token from a PushNotificationConfig.
+
+    The A2A spec's PushNotificationConfig allows two shapes for the
+    authentication secret, and clients choose between them at will:
+
+    1. **Top-level ``token``** — the simple form every SDK produces by
+       default. ``@a2a-js/sdk`` serialises ``{url, token}`` directly
+       and Workstacean's ``SkillDispatcherPlugin`` takes this path
+       (``a2a-executor.ts:329`` → ``setTaskPushNotificationConfig({
+       pushNotificationConfig: { url, token } })``).
+    2. **Structured ``authentication.credentials``** — the RFC-8821
+       ``AuthenticationInfo`` form with ``schemes`` + ``credentials``.
+
+    Before this helper Quinn only read (2), so Workstacean's top-level
+    token fell on the floor → Quinn sent callbacks with no
+    ``Authorization`` header → Workstacean returned 401 "Invalid
+    notification token" → TaskTracker fell back to polling every
+    dispatch (quinn#61 follow-up).
+
+    Preference: top-level ``token`` first (what most callers send), fall
+    back to ``authentication.credentials``. Either one null-safely
+    resolves to ``None`` which disables the header entirely — the same
+    behaviour as the SSRF guard letting a public-IP callback through
+    unauthenticated.
+    """
+    top_level = cfg.get("token")
+    if isinstance(top_level, str) and top_level:
+        return top_level
+    auth = cfg.get("authentication") or {}
+    creds = auth.get("credentials")
+    return creds if isinstance(creds, str) and creds else None
 
 
 # ── Webhook delivery ──────────────────────────────────────────────────────────
@@ -1199,10 +1232,9 @@ def register_a2a_routes(
                     "webhook url rejected: must be http/https, public IP, "
                     "not loopback/private/link-local/multicast/reserved",
                 )
-            auth = cfg_in.get("authentication") or {}
             cfg = PushNotificationConfig(
                 url=url,
-                token=auth.get("credentials"),
+                token=_extract_push_token(cfg_in),
                 id=cfg_in.get("id", str(uuid4())),
             )
             async with _store._lock:
@@ -1407,10 +1439,9 @@ def register_a2a_routes(
                 "not loopback/private/link-local/multicast/reserved",
             )
 
-        auth = body.get("authentication") or {}
         cfg = PushNotificationConfig(
             url=url,
-            token=auth.get("credentials"),
+            token=_extract_push_token(body),
             id=body.get("id", str(uuid4())),
         )
 

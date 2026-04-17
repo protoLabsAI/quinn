@@ -285,6 +285,47 @@ def test_parse_push_config_rejects_unsafe_url():
     assert cfg is None
 
 
+def test_extract_push_token_top_level():
+    """A2A spec PushNotificationConfig accepts two token shapes:
+    top-level `token` (what @a2a-js/sdk serialises by default and
+    Workstacean's SkillDispatcherPlugin uses) OR structured
+    `authentication.credentials`. Before quinn only read the latter —
+    Workstacean's top-level token landed in `cfg.token` as None,
+    Quinn's `_deliver_webhook` skipped the Authorization header, and
+    Workstacean's callback endpoint returned 401 on every delivery.
+    quinn#61 follow-up."""
+    from a2a_handler import _extract_push_token
+    assert _extract_push_token({"token": "ws-token-xyz"}) == "ws-token-xyz"
+
+
+def test_extract_push_token_structured_authentication():
+    """The RFC-8821 AuthenticationInfo shape still works."""
+    from a2a_handler import _extract_push_token
+    assert _extract_push_token({
+        "authentication": {"schemes": ["Bearer"], "credentials": "rfc-token"},
+    }) == "rfc-token"
+
+
+def test_extract_push_token_prefers_top_level_when_both_present():
+    """If a caller sends both (unlikely but spec-permitted), top-level
+    wins — it's the common case and structured is the fallback."""
+    from a2a_handler import _extract_push_token
+    assert _extract_push_token({
+        "token": "preferred",
+        "authentication": {"credentials": "fallback"},
+    }) == "preferred"
+
+
+def test_extract_push_token_none_when_absent():
+    """Neither shape present → None. Delivery still fires, but without
+    an Authorization header (for public or unauthenticated callbacks)."""
+    from a2a_handler import _extract_push_token
+    assert _extract_push_token({}) is None
+    assert _extract_push_token({"token": ""}) is None
+    assert _extract_push_token({"authentication": {}}) is None
+    assert _extract_push_token({"token": None}) is None
+
+
 # ── SSRF allowlist (trusted docker-network hosts) ────────────────────────────
 
 
