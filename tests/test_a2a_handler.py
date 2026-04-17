@@ -661,6 +661,36 @@ async def test_webhook_delivery_success():
 
 
 @pytest.mark.asyncio
+async def test_webhook_success_is_logged_at_info_level(caplog):
+    """Quinn #61 root cause: successful webhook delivery used to log at
+    DEBUG, which is below the default WARNING threshold the server runs
+    at. There was no way to tell from docker logs whether delivery was
+    actually firing. Upgrade locked in — every successful POST must
+    produce an INFO line carrying the task id, final state, and URL."""
+    import logging
+    record = _make_record(state=COMPLETED)
+    cfg = PushNotificationConfig(url="https://example.com/hook")
+
+    with patch("a2a_handler.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value = mock_client
+
+        with caplog.at_level(logging.INFO, logger="a2a_handler"):
+            await _deliver_webhook(record, cfg)
+
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any("webhook delivered" in r.getMessage() for r in info_records), (
+        "successful delivery must log at INFO, not DEBUG — otherwise the "
+        "default WARNING log level silently hides whether delivery is working"
+    )
+
+
+@pytest.mark.asyncio
 async def test_webhook_delivery_no_token():
     record = _make_record(state=FAILED, error_message="oops")
     cfg = PushNotificationConfig(url="https://example.com/hook")
@@ -1003,8 +1033,13 @@ async def test_message_send_returns_submitted():
 
     assert resp.status_code == 200
     data = resp.json()
+    # Spec-compliance: the result must be a full Task object with the
+    # `kind` discriminator — @a2a-js/sdk routes by kind. Inline-dict
+    # builds have omitted it in the past (quinn#61 investigation).
+    assert data["result"]["kind"] == "task"
     assert data["result"]["status"]["state"] == SUBMITTED
     assert "id" in data["result"]
+    assert "contextId" in data["result"]
 
 
 @pytest.mark.asyncio

@@ -655,7 +655,14 @@ async def _deliver_webhook(record: TaskRecord, push_config: PushNotificationConf
             try:
                 resp = await client.post(push_config.url, json=payload, headers=headers)
                 if resp.status_code < 500:
-                    logger.debug("[a2a] webhook delivered → %s (%s)", push_config.url, resp.status_code)
+                    # Upgraded from DEBUG → INFO (quinn#61). The absence of
+                    # this line was the main reason we couldn't tell whether
+                    # webhook delivery was firing at all — the whole path ran
+                    # under the default WARNING threshold.
+                    logger.info(
+                        "[a2a] webhook delivered task=%s state=%s → %s (%s)",
+                        record.id, record.state, push_config.url, resp.status_code,
+                    )
                     return
                 logger.warning("[a2a] webhook 5xx (attempt %d): %s", attempt + 1, resp.status_code)
             except httpx.RequestError as exc:
@@ -1114,12 +1121,13 @@ def register_a2a_routes(
 
             if method == "message/send":
                 record = await _submit_task(text, context_id, push_config, caller_trace)
-                return _rpc_result({
-                    "id": record.id,
-                    "contextId": record.context_id,
-                    "status": {"state": SUBMITTED,
-                               "timestamp": record.created_at},
-                })
+                # Use _task_to_response so the `kind: "task"` discriminator
+                # and every other Task field land consistently with the
+                # SSE / REST / tasks/get paths. Building the dict inline
+                # omitted `kind`, which `@a2a-js/sdk` uses to route the
+                # result into its Task handler (spec-compliance with the
+                # a2a-streaming guide).
+                return _rpc_result(_task_to_response(record))
 
             # streaming path — SSE frames wrapped in JSON-RPC envelopes
             return StreamingResponse(
@@ -1199,8 +1207,15 @@ def register_a2a_routes(
             )
             async with _store._lock:
                 record.push_config = cfg
+            # Fire immediately if the task already reached terminal state
+            # before the caller got around to registering — otherwise the
+            # webhook would never be delivered (quinn#61).
             if record.state in _TERMINAL:
                 await _push(record)
+            logger.info(
+                "[a2a] push config registered (jsonrpc) task=%s state=%s → %s",
+                task_id, record.state, cfg.url,
+            )
             return _rpc_result({
                 "taskId": task_id,
                 "pushNotificationConfig": {"url": cfg.url, "id": cfg.id},
