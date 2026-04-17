@@ -161,7 +161,9 @@ Quinn has 4 A2A skills: `qa_report`, `board_audit`, `bug_triage`, `pr_review`.
 
 Quinn advertises `capabilities.streaming: true` and `pushNotifications: true` and serves the full A2A spec surface (`message/send`, `message/stream`, `tasks/get`, `tasks/cancel`, `tasks/resubscribe`, `tasks/pushNotificationConfig/{set,get,list,delete}`). Every SSE event carries a `kind` discriminator (`task` / `status-update` / `artifact-update`) with camelCase wire fields per the spec — required for `@a2a-js/sdk` to route events.
 
-Push-notification callback URLs are SSRF-validated. Trusted internal docker-network agents can be allowlisted via `PUSH_NOTIFICATION_ALLOWED_HOSTS` / `PUSH_NOTIFICATION_ALLOWED_CIDRS` env vars (default-deny otherwise).
+Push-notification callback URLs are SSRF-validated. Trusted internal docker-network agents can be allowlisted via `PUSH_NOTIFICATION_ALLOWED_HOSTS` / `PUSH_NOTIFICATION_ALLOWED_CIDRS` env vars (default-deny otherwise). The token-parsing accepts both spec-legal shapes — top-level `token` (most SDKs) and structured `authentication.credentials` (RFC-8821 form) — so Workstacean and @a2a-js/sdk callers both work out of the box.
+
+Operator tuning: `LOG_LEVEL=INFO` (the default) surfaces every push-config registration and webhook delivery attempt with task id + state + response code — concrete evidence for every callback, not silence.
 
 ### A2A extensions
 
