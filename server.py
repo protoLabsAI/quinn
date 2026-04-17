@@ -24,6 +24,17 @@ from graph.output_format import extract_output
 # otherwise block anyone from importing tiny helpers (e.g. _build_agent_card)
 # out of this module for tests. Keep the import inside _main().
 
+# Root-level log config. Python's default is WARNING, which silently filtered
+# every `logger.info(...)` call — including "push config registered" and
+# "webhook delivered" lines from a2a_handler, making every diagnosis of the
+# A2A/webhook path a guess-and-check session (quinn#61). INFO is the right
+# default for a production agent; LOG_LEVEL env var lets operators tune up
+# or down without a code change.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+
 # Module-level logger — used to surface uncaught exceptions in the LangGraph
 # stream/invoke code with a full traceback. Without this the A2A handler only
 # sees str(e), which drops the frame location and makes every runtime bug a
