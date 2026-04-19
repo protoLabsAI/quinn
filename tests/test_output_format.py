@@ -18,6 +18,7 @@ from __future__ import annotations
 from graph.output_format import (
     OUTPUT_FORMAT_INSTRUCTIONS,
     _strip_reasoning,
+    extract_confidence,
     extract_output,
 )
 
@@ -94,3 +95,74 @@ def test_instructions_mention_both_tags():
     """Sanity check — the prompt fragment must teach both tags."""
     assert "<scratch_pad>" in OUTPUT_FORMAT_INSTRUCTIONS
     assert "<output>" in OUTPUT_FORMAT_INSTRUCTIONS
+
+
+# ── confidence-v1 parsing ────────────────────────────────────────────────────
+
+
+def test_extract_confidence_happy_path():
+    text = (
+        "<scratch_pad>think</scratch_pad>"
+        "<output>answer</output>"
+        "<confidence>0.82</confidence>"
+        "<confidence_explanation>Spec clear; tests pass.</confidence_explanation>"
+    )
+    conf, expl = extract_confidence(text)
+    assert conf == 0.82
+    assert expl == "Spec clear; tests pass."
+
+
+def test_extract_confidence_returns_none_when_absent():
+    """Model didn't self-report — both values must be None so the stream
+    skips the confidence event entirely."""
+    assert extract_confidence("<output>answer</output>") == (None, None)
+
+
+def test_extract_confidence_clamps_out_of_range():
+    """Miscalibrated models occasionally emit >1 or <0. Clamp so the
+    DataPart on the wire stays in-spec."""
+    high, _ = extract_confidence("<confidence>1.3</confidence>")
+    low, _ = extract_confidence("<confidence>-0.4</confidence>")
+    assert high == 1.0
+    assert low == 0.0
+
+
+def test_extract_confidence_unparseable_returns_none():
+    """Garbage like <confidence>probably</confidence> → None, not a crash."""
+    conf, expl = extract_confidence("<confidence>probably</confidence>")
+    assert conf is None
+    assert expl is None
+
+
+def test_extract_confidence_explanation_optional():
+    """A <confidence> tag without an accompanying explanation still
+    yields the score (explanation is optional per the spec)."""
+    conf, expl = extract_confidence("<confidence>0.5</confidence>")
+    assert conf == 0.5
+    assert expl is None
+
+
+def test_extract_output_strips_confidence_tags():
+    """Confidence markers must not leak into the user-facing output —
+    they're metadata for the interceptor, not prose for the reader."""
+    text = (
+        "<output>the answer</output>"
+        "<confidence>0.9</confidence>"
+        "<confidence_explanation>why</confidence_explanation>"
+    )
+    # extract_output reads the <output> body directly; the extra tags
+    # live outside it and simply shouldn't survive the reasoning strip
+    # if someone concatenates without wrapping.
+    assert extract_output(text) == "the answer"
+
+    # Mixed bag — no <output>, just tags at the end. _strip_reasoning
+    # should drop confidence entirely.
+    tailing = "plain answer<confidence>0.7</confidence>"
+    assert extract_output(tailing) == "plain answer"
+
+
+def test_instructions_mention_confidence_tags():
+    """The prompt must teach <confidence> so the model actually emits
+    the score — the whole extension is dead weight without this."""
+    assert "<confidence>" in OUTPUT_FORMAT_INSTRUCTIONS
+    assert "<confidence_explanation>" in OUTPUT_FORMAT_INSTRUCTIONS

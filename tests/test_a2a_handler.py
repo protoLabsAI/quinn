@@ -839,6 +839,85 @@ async def test_store_add_usage_ignores_zero_payloads(store):
     assert fetched.usage == {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 
+# ── confidence-v1 ─────────────────────────────────────────────────────────────
+
+
+def test_terminal_artifact_emits_confidence_v1_when_set():
+    """When the producer set a confidence score on the record, the terminal
+    artifact carries a confidence-v1 DataPart with confidence + success +
+    optional explanation. Workstacean's confidence interceptor extracts
+    this onto result.data for per-(agent, skill) ConfidenceSamples."""
+    from a2a_handler import CONFIDENCE_MIME, _terminal_artifact_parts
+    record = _make_record(state=COMPLETED, accumulated_text="hi")
+    record.confidence = 0.82
+    record.confidence_explanation = "Spec unambiguous; all tests pass."
+    parts = _terminal_artifact_parts(record)
+    conf = next(
+        (p for p in parts if p.get("metadata", {}).get("mimeType") == CONFIDENCE_MIME),
+        None,
+    )
+    assert conf is not None, "confidence-v1 DataPart missing"
+    assert conf["data"]["confidence"] == 0.82
+    assert conf["data"]["confidenceExplanation"] == "Spec unambiguous; all tests pass."
+    assert conf["data"]["success"] is True
+
+
+def test_terminal_artifact_confidence_success_is_false_on_failure():
+    """FAILED and CANCELED terminal states must report success=False so the
+    interceptor can classify high-confidence failures — the whole point
+    of calibration tracking."""
+    from a2a_handler import CONFIDENCE_MIME, _terminal_artifact_parts
+    record = _make_record(state=FAILED, accumulated_text="")
+    record.confidence = 0.9
+    parts = _terminal_artifact_parts(record)
+    conf = next(
+        (p for p in parts if p.get("metadata", {}).get("mimeType") == CONFIDENCE_MIME),
+        None,
+    )
+    assert conf is not None
+    assert conf["data"]["success"] is False
+    # explanation omitted when not set — avoids empty string noise.
+    assert "confidenceExplanation" not in conf["data"]
+
+
+def test_terminal_artifact_omits_confidence_v1_when_not_reported():
+    """No <confidence> tag in the model output → no DataPart. The
+    interceptor no-ops on absent confidence, so emitting an empty payload
+    would just be noise."""
+    from a2a_handler import CONFIDENCE_MIME, _terminal_artifact_parts
+    record = _make_record(state=COMPLETED, accumulated_text="hi")
+    # confidence defaults to None
+    parts = _terminal_artifact_parts(record)
+    conf = next(
+        (p for p in parts if p.get("metadata", {}).get("mimeType") == CONFIDENCE_MIME),
+        None,
+    )
+    assert conf is None
+
+
+@pytest.mark.asyncio
+async def test_store_set_confidence_clamps_to_unit_interval(store):
+    """Misbehaving models can emit 1.2 or -0.3. We clamp to [0, 1] here
+    too (the workstacean interceptor also clamps, but defence-in-depth
+    keeps the DataPart in-spec on the wire)."""
+    record = _make_record()
+    await store.create(record)
+    await store.set_confidence("test-task-id", confidence=1.5, explanation="over")
+    fetched = await store.get("test-task-id")
+    assert fetched.confidence == 1.0
+    assert fetched.confidence_explanation == "over"
+    await store.set_confidence("test-task-id", confidence=-0.2)
+    fetched = await store.get("test-task-id")
+    assert fetched.confidence == 0.0
+
+
+@pytest.mark.asyncio
+async def test_store_set_confidence_ignores_missing_task(store):
+    """set_confidence on an unknown task id must no-op, not raise."""
+    await store.set_confidence("no-such-task", confidence=0.5)
+    # No exception = pass
+
+
 def test_task_to_response_has_kind_discriminator():
     """A2A spec: Task objects carry kind='task'. This is what
     message/send / tasks/get / initial stream frame all return."""

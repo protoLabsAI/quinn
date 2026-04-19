@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from graph.output_format import extract_output
+from graph.output_format import extract_confidence, extract_output
 
 # chat_ui pulls in gradio, which the server needs at runtime but which would
 # otherwise block anyone from importing tiny helpers (e.g. _build_agent_card)
@@ -476,6 +476,17 @@ async def _chat_langgraph_stream(message: str, session_id: str, *, caller_trace:
                             "output_tokens": int(usage.get("output_tokens", 0) or 0),
                         })
 
+            # Self-reported confidence, if the model emitted <confidence>
+            # tags. Pulled from the raw text BEFORE extract_output strips
+            # reasoning markers. Emitted ahead of "done" so the a2a handler
+            # stamps it on the terminal artifact.
+            confidence, explanation = extract_confidence(accumulated_raw)
+            if confidence is not None:
+                yield ("confidence", {
+                    "confidence": confidence,
+                    "explanation": explanation,
+                })
+
             yield ("done", extract_output(accumulated_raw))
 
         except GeneratorExit:
@@ -818,6 +829,56 @@ def _build_agent_card(host: str) -> dict:
                 # response_cost through.
                 {
                     "uri": "https://proto-labs.ai/a2a/ext/cost-v1",
+                },
+                # confidence-v1: Quinn emits a self-reported confidence score
+                # on the terminal artifact when the model includes
+                # <confidence>/<confidence_explanation> tags (see
+                # graph/output_format.py). Workstacean's confidence
+                # interceptor records per-(agent, skill) samples so planner
+                # ranking can weight by avgConfidenceOnSuccess and
+                # OutcomeAnalysis can flag high-confidence-failure clusters.
+                # Ref: docs/extensions/confidence-v1.md in protoWorkstacean.
+                {
+                    "uri": "https://proto-labs.ai/a2a/ext/confidence-v1",
+                },
+                # blast-v1: per-skill scope of effect so HITL policy +
+                # planner can apply stricter gates to higher-impact work.
+                # Read-side only (no response payload). Radii here align
+                # with what Quinn actually does in each skill handler —
+                # don't over-declare, the planner uses this for tiebreaking.
+                #
+                # Ref: docs/extensions/blast-v1.md in protoWorkstacean.
+                {
+                    "uri": "https://proto-labs.ai/a2a/ext/blast-v1",
+                    "params": {
+                        "skills": {
+                            "qa_report":   {"radius": "self"},
+                            "board_audit": {"radius": "project"},
+                            "pr_review":   {"radius": "repo"},
+                            "bug_triage":  {"radius": "project"},
+                        },
+                    },
+                },
+                # hitl-mode-v1: per-skill approval policy. Composes with
+                # blast-v1 so higher-blast work can be gated independently
+                # of goal-level config. All Quinn skills are safe enough to
+                # run without blocking gates today — bug_triage files a
+                # backlog feature (reversible), board_audit + qa_report
+                # are read-only, pr_review posts review comments but never
+                # merges. Notification mode surfaces the action to the
+                # originating surface without blocking.
+                #
+                # Ref: docs/extensions/hitl-mode-v1.md in protoWorkstacean.
+                {
+                    "uri": "https://proto-labs.ai/a2a/ext/hitl-mode-v1",
+                    "params": {
+                        "skills": {
+                            "qa_report":   {"mode": "autonomous"},
+                            "board_audit": {"mode": "notification"},
+                            "pr_review":   {"mode": "notification"},
+                            "bug_triage":  {"mode": "notification"},
+                        },
+                    },
                 },
             ],
         },
