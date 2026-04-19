@@ -118,6 +118,84 @@ def test_agent_card_declares_cost_v1_extension() -> None:
     )
 
 
+def test_agent_card_declares_confidence_v1_extension() -> None:
+    """Quinn emits a confidence-v1 DataPart when the model self-reports
+    via <confidence> tags. The declaration tells Workstacean's confidence
+    interceptor to expect the payload on result.data."""
+    from server import _build_agent_card
+
+    card = _build_agent_card("quinn:7870")
+    exts = card["capabilities"].get("extensions", [])
+    conf_ext = next(
+        (e for e in exts
+         if e.get("uri") == "https://proto-labs.ai/a2a/ext/confidence-v1"),
+        None,
+    )
+    assert conf_ext is not None, (
+        "Missing confidence-v1 extension — planner ranking won't get "
+        "avgConfidenceOnSuccess samples from Quinn."
+    )
+
+
+def test_agent_card_declares_blast_v1_with_real_skills() -> None:
+    """blast-v1 is card-only policy metadata — HITL policy + planner read
+    the radius to decide gating. Every radius must map to a real skill in
+    the card (over-declaring invents skills the planner can't actually
+    route to); every radius must be one of the five valid values."""
+    from server import _build_agent_card
+
+    card = _build_agent_card("quinn:7870")
+    exts = card["capabilities"].get("extensions", [])
+    blast_ext = next(
+        (e for e in exts
+         if e.get("uri") == "https://proto-labs.ai/a2a/ext/blast-v1"),
+        None,
+    )
+    assert blast_ext is not None, "Missing blast-v1 extension declaration."
+
+    declared = blast_ext.get("params", {}).get("skills", {})
+    assert declared, "blast-v1 declared but no skills mapped."
+
+    real_skill_ids = {s["id"] for s in card["skills"]}
+    valid_radii = {"self", "project", "repo", "fleet", "public"}
+    for skill_id, entry in declared.items():
+        assert skill_id in real_skill_ids, (
+            f"blast-v1 declares '{skill_id}' but no such skill on card"
+        )
+        assert entry.get("radius") in valid_radii, (
+            f"blast-v1 '{skill_id}' has invalid radius {entry.get('radius')!r}"
+        )
+
+
+def test_agent_card_declares_hitl_mode_v1_with_real_skills() -> None:
+    """hitl-mode-v1 is card-only approval policy. HITL plugin reads the
+    mode to select the rendering path. Validate every declared skill
+    exists on the card and every mode is one of the five valid values."""
+    from server import _build_agent_card
+
+    card = _build_agent_card("quinn:7870")
+    exts = card["capabilities"].get("extensions", [])
+    hitl_ext = next(
+        (e for e in exts
+         if e.get("uri") == "https://proto-labs.ai/a2a/ext/hitl-mode-v1"),
+        None,
+    )
+    assert hitl_ext is not None, "Missing hitl-mode-v1 extension declaration."
+
+    declared = hitl_ext.get("params", {}).get("skills", {})
+    assert declared, "hitl-mode-v1 declared but no skills mapped."
+
+    real_skill_ids = {s["id"] for s in card["skills"]}
+    valid_modes = {"autonomous", "notification", "veto", "gated", "compound"}
+    for skill_id, entry in declared.items():
+        assert skill_id in real_skill_ids, (
+            f"hitl-mode-v1 declares '{skill_id}' but no such skill on card"
+        )
+        assert entry.get("mode") in valid_modes, (
+            f"hitl-mode-v1 '{skill_id}' has invalid mode {entry.get('mode')!r}"
+        )
+
+
 # ── Worldstate-delta-v1 runtime emission ─────────────────────────────────────
 
 
