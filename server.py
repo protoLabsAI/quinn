@@ -790,7 +790,7 @@ def _build_agent_card(host: str) -> dict:
             # Ref: docs/extensions/effect-domain-v1.md in protoWorkstacean.
             "extensions": [
                 {
-                    "uri": "https://protolabs.ai/a2a/ext/effect-domain-v1",
+                    "uri": "https://proto-labs.ai/a2a/ext/effect-domain-v1",
                     "params": {
                         "skills": {
                             "bug_triage": {
@@ -817,7 +817,7 @@ def _build_agent_card(host: str) -> dict:
                 # extraction side; a Quinn follow-up will plumb LiteLLM's
                 # response_cost through.
                 {
-                    "uri": "https://protolabs.ai/a2a/ext/cost-v1",
+                    "uri": "https://proto-labs.ai/a2a/ext/cost-v1",
                 },
             ],
         },
