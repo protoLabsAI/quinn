@@ -55,7 +55,7 @@ def test_agent_card_declares_effect_domain_extension() -> None:
     exts = card["capabilities"].get("extensions", [])
     effect_ext = next(
         (e for e in exts
-         if e.get("uri") == "https://protolabs.ai/a2a/ext/effect-domain-v1"),
+         if e.get("uri") == "https://proto-labs.ai/a2a/ext/effect-domain-v1"),
         None,
     )
     assert effect_ext is not None, (
@@ -88,7 +88,7 @@ def test_agent_card_does_not_over_declare_read_only_effects() -> None:
     exts = card["capabilities"].get("extensions", [])
     effect_ext = next(
         (e for e in exts
-         if e.get("uri") == "https://protolabs.ai/a2a/ext/effect-domain-v1"),
+         if e.get("uri") == "https://proto-labs.ai/a2a/ext/effect-domain-v1"),
         {"params": {"skills": {}}},
     )
     declared = effect_ext["params"]["skills"]
@@ -109,7 +109,7 @@ def test_agent_card_declares_cost_v1_extension() -> None:
     exts = card["capabilities"].get("extensions", [])
     cost_ext = next(
         (e for e in exts
-         if e.get("uri") == "https://protolabs.ai/a2a/ext/cost-v1"),
+         if e.get("uri") == "https://proto-labs.ai/a2a/ext/cost-v1"),
         None,
     )
     assert cost_ext is not None, (
